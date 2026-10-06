@@ -1,0 +1,1151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Photo Detective — browser suite</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  /* The suite reads layout, so it needs a real viewport-sized body. */
+  body { margin: 0; }
+  #out {
+    position: fixed; inset: auto 0 0 0; z-index: 99999;
+    max-height: 40vh; overflow: auto;
+    font: 12px/1.45 ui-monospace, Menlo, monospace;
+    background: #000; color: #ddd; padding: 8px 10px; white-space: pre-wrap;
+  }
+  #out .p { color: #6f6; }
+  #out .f { color: #f77; font-weight: 700; }
+  #out .s { color: #8cf; font-weight: 700; margin-top: 6px; }
+</style>
+</head>
+<body>
+<!-- The game's own markup, injected from ../index.html so this page can never
+     drift from the real thing. -->
+<div id="stage"></div>
+<pre id="out"></pre>
+
+<script>
+/* ============================================================
+   probe.html — the browser regression suite.
+
+   The game is loaded into this page by pulling ../index.html and
+   running its scripts here, so every assertion runs against the
+   real DOM, the real CSS and the real module code. Nothing is
+   stubbed except the file picker, which a browser only opens from a
+   user gesture and which no automation can drive.
+
+   Progress is POSTed to /report as it goes and the ending to
+   /report-final, which run.sh waits for.
+   ============================================================ */
+
+(function () {
+  'use strict';
+
+  var OUT = document.getElementById('out');
+  var passes = 0, failures = 0;
+  var LINES = [];
+  var PD = null;          // window.PhotoDetective, once the game has booted
+
+  // Shared across the steps below. Each step is its own function, so a var
+  // declared inside one is invisible to the next.
+  var files, photoBefore, orderBefore, other, otherTitle, target, dbg1, swapSize;
+  var nextTitle, aurora;
+
+  function paint(line, cls) {
+    LINES.push(line);
+    OUT.textContent = LINES.join('\n');
+    OUT.scrollTop = OUT.scrollHeight;
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report', true);
+    post.send(line + '\n');
+    if (cls) OUT.insertAdjacentHTML('beforeend', '');
+  }
+
+  function section(name) { paint('\n== ' + name); }
+
+  function ok(cond, label, got) {
+    if (cond) { passes++; paint('PASS ' + label + (got == null ? '' : '  [' + got + ']')); }
+    else { failures++; paint('FAIL ' + label + '  [got=' + got + ']', 'f'); }
+    return !!cond;
+  }
+
+  function eq(actual, want, label) {
+    return ok(actual === want, label, JSON.stringify(actual) + ' want ' + JSON.stringify(want));
+  }
+
+  function bail(where, err) {
+    failures++;
+    paint('FAIL threw in ' + where + ': ' + (err && err.stack ? err.stack : err), 'f');
+  }
+
+  function finish() {
+    paint('failures ' + failures);
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report-final', true);
+    post.send('failures ' + failures + '\n' + LINES.join('\n') + '\n');
+  }
+
+
+  /** Poll until `test` is true, or give up. Rejection is caught by the chain. */
+  function waitFor(test, ms, why) {
+    ms = ms || 4000;
+    var deadline = Date.now() + ms;
+    return new Promise(function (resolve, reject) {
+      (function again() {
+        var v;
+        try { v = test(); } catch (e) { reject(e); return; }
+        if (v) { resolve(v); return; }
+        if (Date.now() > deadline) {
+          reject(new Error('timed out after ' + ms + 'ms waiting for ' + (why || 'condition')));
+          return;
+        }
+        setTimeout(again, 25);
+      })();
+    });
+  }
+
+  /* ---------------------------------------------------------- DOM helpers */
+
+  var D = document;
+  function $(id) { return D.getElementById(id); }
+  function q(sel) { return Array.prototype.slice.call(D.querySelectorAll(sel)); }
+  function click(node) {
+    if (!node) throw new Error('clicked nothing');
+    node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  }
+  function cardByPiece(id) { return $('board').querySelector('.piece[data-piece="' + id + '"]'); }
+  function flippedCount() { return q('.piece.is-flipped').length; }
+
+  /** The colour at one pixel of a canvas, as [r, g, b]. */
+  function pixelAt(canvas, x, y) {
+    var ctx = canvas.getContext('2d');
+    var d = ctx.getImageData(x, y, 1, 1).data;
+    return [d[0], d[1], d[2]];
+  }
+
+  /** True when a canvas holds nothing but transparent black: never painted. */
+  function blank(canvas) {
+    if (!canvas.width || !canvas.height) return true;
+    var px = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    for (var i = 3; i < px.length; i += 4) {
+      if (px[i] !== 0) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Wait for a freshly dealt board for `title`, every card face down.
+   *
+   * The cards are rebuilt from scratch, so the first card being a different
+   * node is what distinguishes "the new round is up" from "the old round is
+   * still on screen". Watching the counters is not enough: `seen` clears
+   * before the board re-renders, and `inspected` counts the whole run, so
+   * both read as ready while the previous round is still displayed.
+   */
+  function waitForBoard(ready, what, ms) {
+    var previous = q('.piece')[0];
+    return waitFor(function () {
+      var cards = q('.piece');
+      return cards.length === 30 &&
+             cards[0] !== previous &&
+             ready() &&
+             PD.debug().flipped === 0 &&
+             !flippedCount();
+    }, ms || 6000, 'a fresh face-down board ' + what).catch(function (err) {
+      // A bare timeout here is hard to read from a log, so say what is
+      // actually on screen: the usual cause is the wrong photo being dealt.
+      throw new Error(err.message +
+        ' [showing ' + JSON.stringify(PD.debug().current) +
+        ', ' + q('.piece').length + ' cards, ' + flippedCount() + ' turned]');
+    });
+  }
+
+  function waitForRound(title, ms) {
+    return waitForBoard(function () { return PD.debug().current === title; }, 'for ' + title, ms);
+  }
+
+  /**
+   * The reveal card does not name the photo it is about to deal, so a test that
+   * follows it cannot know the title in advance. This waits for a dealt board
+   * showing any photo other than the one just played.
+   *
+   * `previousTitle` has to be read by the caller before it clicks, because the
+   * deal can land before this is called.
+   */
+  function waitForNewRound(previousTitle, ms) {
+    return waitForBoard(function () { return PD.debug().current !== previousTitle; },
+                        'with a photo other than ' + previousTitle, ms);
+  }
+
+  /* ---------------------------------------------------------- fixture photos
+
+     The picker cannot be driven, so the suite feeds the library the same
+     File objects the picker would hand over: real image bytes read from
+     test/fixtures, carrying the folder-relative path a directory selection
+     would have given them. Everything downstream is the real code path. */
+
+  var FIXTURES = [
+    { path: 'Photo library/beach_sunset.png',    bytes: null },
+    { path: 'Photo library/2023 Spain/Beach.png', bytes: null },
+    { path: 'Photo library/2024 Iceland/aurora.png', bytes: null },
+    { path: 'Photo library/2024 Iceland/Beach.png', bytes: null }
+  ];
+
+  function loadFixtures() {
+    return Promise.all(FIXTURES.map(function (f) {
+      return fetch('../test/fixtures/' + f.path)
+        .then(function (r) {
+          if (!r.ok) throw new Error('missing fixture ' + f.path + ' (run make-fixtures.py)');
+          return r.blob();
+        })
+        .then(function (blob) {
+          var name = f.path.split('/').pop();
+          var file = new File([blob], name, { type: 'image/png' });
+          // What a real directory selection sets, and what importFiles reads.
+          Object.defineProperty(file, 'webkitRelativePath', { value: f.path });
+          return { file: file, path: f.path, name: name };
+        });
+    }));
+  }
+
+  /**
+   * The same folder, with one photo swapped for different bytes under the same
+   * path -- what happens when the host drops a larger version of a soft photo
+   * into the library. The replacement is drawn here rather than read from disk,
+   * so it is a different size from every fixture (which all share one).
+   *
+   * `recordPath` is the library's own path for the photo. The fixtures carry it
+   * with the folder name on the front, which the library strips, so the match
+   * is on the tail.
+   */
+  function swapPhoto(items, recordPath, pixels) {
+    var target = items.filter(function (it) {
+      return it.path === recordPath || it.path.slice(-recordPath.length) === recordPath;
+    })[0];
+    if (!target) throw new Error('no fixture at ' + recordPath);
+
+    var c = document.createElement('canvas');
+    c.width = pixels;
+    c.height = Math.round(pixels * 0.75);
+    var x = c.getContext('2d');
+    x.fillStyle = '#2b6cb0';
+    x.fillRect(0, 0, c.width, c.height);
+    return new Promise(function (resolve, reject) {
+      c.toBlob(function (blob) {
+        // Thrown inside a callback this would leave the promise pending for
+        // ever, which reads as a hang with nothing to go on.
+        if (!blob) { reject(new Error('the replacement photo would not encode')); return; }
+        var f = new File([blob], target.name, { type: 'image/png' });
+        Object.defineProperty(f, 'webkitRelativePath', { value: target.path });
+        resolve({
+          size: f.size,
+          items: items.map(function (it) {
+            return it === target ? { file: f, path: target.path, name: target.name } : it;
+          })
+        });
+      }, 'image/png');
+    });
+  }
+
+  /**
+   * Hand `files` to the library exactly as the picker does: a plain File with
+   * `webkitRelativePath` set. Passing `{file, path}` wrappers instead is a
+   * different, internal shape -- it keeps the chosen folder's own name as part
+   * of every record's folder, so it does not test the real path.
+   *
+   * `paths` replaces the folder-relative paths, which is how a rename or a
+   * move is simulated: same bytes, different path.
+   */
+  /* The library's own IndexedDB store. Reading it is how a test sees what was
+     cached; writing to it is how a test reproduces a cache written by an older
+     build. init() then reads the store back, which is how the app itself picks
+     up a changed cache. */
+  function getRecord(id) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open('photo-detective');
+      req.onerror = function () { reject(req.error); };
+      req.onsuccess = function () {
+        var db = req.result;
+        var get = db.transaction('photos', 'readonly').objectStore('photos').get(id);
+        get.onsuccess = function () { var v = get.result; db.close(); resolve(v); };
+        get.onerror = function () { db.close(); reject(get.error); };
+      };
+    });
+  }
+
+  function putRecord(rec) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open('photo-detective');
+      req.onerror = function () { reject(req.error); };
+      req.onsuccess = function () {
+        var db = req.result;
+        var tx = db.transaction('photos', 'readwrite');
+        tx.objectStore('photos').put(rec);
+        tx.oncomplete = function () { db.close(); resolve(); };
+        tx.onerror = function () { db.close(); reject(tx.error); };
+        tx.onabort = function () { db.close(); reject(tx.error || new Error('write aborted')); };
+      };
+    });
+  }
+
+  function importPaths(files, paths) {
+    var items = files.map(function (f, i) {
+      var path = paths ? paths[i] : f.path;
+      var copy = new File([f.file], path.split('/').pop(), { type: 'image/png' });
+      Object.defineProperty(copy, 'webkitRelativePath', { value: path });
+      return copy;
+    });
+    return window.PhotoLibrary.importFiles(items, null);
+  }
+
+  /* ---------------------------------------------------------- boot */
+
+  function boot() {
+    // Pull the real page in and run its scripts here, so the suite is testing
+    // the shipped markup rather than a copy that can rot.
+    return fetch('../index.html').then(function (r) { return r.text(); }).then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var stage = $('stage');
+      Array.prototype.slice.call(doc.body.children).forEach(function (node) {
+        if (node.tagName === 'SCRIPT') return;      // loaded separately, in order
+        stage.appendChild(D.importNode(node, true));
+      });
+
+      var scripts = ['stage.js', 'library.js', 'puzzle.js', 'game.js'];
+      return scripts.reduce(function (chain, src) {
+        return chain.then(function () {
+          return new Promise(function (resolve, reject) {
+            var s = D.createElement('script');
+            s.src = '../js/' + src;
+            s.onload = resolve;
+            s.onerror = function () { reject(new Error('failed to load js/' + src)); };
+            D.head.appendChild(s);
+          });
+        });
+      }, Promise.resolve());
+    });
+  }
+
+  /* ---------------------------------------------------------- the suite */
+
+  boot().then(function () {
+    PD = window.PhotoDetective;
+    var lib = window.PhotoLibrary;
+    ok(!!PD && !!lib, 'the game and the library both booted');
+
+    /* ================================================== before a folder is chosen
+       The drawn scenes are gone, so with an empty library there is no game to
+       start. The start button cannot start anything, so it goes and gets the
+       folder instead of failing. */
+    section('before a folder is chosen');
+    eq(window.PhotoCatalog, undefined, 'the drawn scenes are gone', String(window.PhotoCatalog));
+    ok(!!window.PhotoStage, 'the drawing stage they shared is still here', typeof window.PhotoStage);
+    eq(lib.state().present, 0, 'the library is empty', lib.state().present);
+    eq(PD.debug().phase, 'menu', 'the game is waiting on the menu', PD.debug().phase);
+    ok(/photo library/i.test($('btnStart').textContent),
+       'the start button says what it is going to do', $('btnStart').textContent);
+    ok(!$('btnStart').disabled, 'and it is there to be pressed', $('btnStart').disabled);
+
+    click($('btnStart'));
+    return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); },
+                   4000, 'the picker').then(function () {
+      eq(PD.debug().phase, 'menu', 'no game was started', PD.debug().phase);
+      eq($('overlayStart').hasAttribute('hidden'), false, 'the start screen is still up', true);
+      ok(!$('libEmpty').hasAttribute('hidden'), 'the picker asks for a folder', $('libHint').textContent);
+      ok(/folder/i.test($('libEmpty').textContent), 'and says so in as many words',
+         $('libEmpty').textContent.trim().slice(0, 60));
+
+      click($('btnLibFinish'));
+      return waitFor(function () { return !$('overlayStart').hasAttribute('hidden'); },
+                     4000, 'back to the start screen');
+    }).then(function () {
+      eq(D.activeElement.id, 'btnStart', 'and the host is put back on the start button',
+         D.activeElement.id);
+      return loadFixtures();
+    }).then(function (loaded) {
+      files = loaded;
+      return importPaths(files, null);
+    }).then(function () {
+      /* ============================================ the library reads a folder
+         Records are keyed on the folder-relative path, so what the host sees
+         is derived from the folder and nothing has to be re-declared in code. */
+      section('the photo library folder');
+
+      var snap = lib.state();
+      eq(snap.total, 4, 'every photo in the folder was found', snap.total);
+      eq(snap.present, 4, 'all of them are playable', snap.present);
+      eq(snap.missing, 0, 'and none is missing', snap.missing);
+      eq(snap.folder, 'Photo library', 'the folder is remembered by name', snap.folder);
+      eq(snap.storage, 'indexeddb', 'photos are cached, so a reload keeps them', snap.storage);
+
+      // present() plays in a stable order: sorted by folder-relative path.
+      var names = lib.present().map(function (e) { return e.title; });
+      eq(names.join(' | '), 'Beach | aurora | 2024 Iceland › Beach | beach sunset',
+         'titles come from the paths', names.join(' | '));
+      // Deck entries expose the folder as `category`; the raw path lives on the
+      // record, which details() hands back.
+      eq(lib.present().map(function (e) { return lib.details(e.id).path; }).join(' | '),
+         '2023 Spain/Beach.png | 2024 Iceland/aurora.png | 2024 Iceland/Beach.png | beach_sunset.png',
+         'and so does the order they are dealt in');
+
+      // Every photo must carry a usable set of answers, or the round cannot be won.
+      var answers = lib.present().map(function (e) { return e.answers.length; });
+      ok(answers.every(function (n) { return n >= 1; }), 'every photo can be identified',
+         answers.join(','));
+
+      return waitFor(function () {
+        return PD.debug().phase === 'menu' && !$('overlayStart').hasAttribute('hidden');
+      }, 4000, 'the start overlay');
+    }).then(function () {
+      /* ============================================= two photos, one filename
+         Two files called Beach.png would both answer to "beach" and the game
+         would be unwinnable, so the second gains the folder it lives in. */
+      section('duplicate filenames');
+      var dupes = lib.present().filter(function (e) { return /Beach/.test(e.title); })
+                              .map(function (e) { return e.title; }).sort();
+      eq(dupes.join(' | '), '2024 Iceland › Beach | Beach',
+         'the clash is qualified by folder', dupes.join(' | '));
+
+      var plain = lib.present().filter(function (e) { return e.title === 'Beach'; })[0];
+      ok(plain && lib.details(plain.id).path === '2023 Spain/Beach.png',
+         'one of them keeps the plain name', plain && lib.details(plain.id).path);
+      ok(plain.answers.indexOf('Beach') !== -1, 'and still answers to it', plain.answers.join(' / '));
+
+      var qualified = lib.present().filter(function (e) { return /› Beach/.test(e.title); })[0];
+      ok(qualified && qualified.answers.indexOf(qualified.title) !== -1,
+         'and the qualified one answers to its own name too', qualified.answers.join(' / '));
+
+      /* ============================================= the host is told the truth
+         One writer owns the hint line, so a message cannot outlive the
+         condition that produced it. With nothing wrong there is nothing to
+         say, and saying something anyway is the bug this guards. */
+      section('the host is told what it needs to be told');
+      ok($('libHint').hidden, 'no hint while nothing is wrong', $('libHint').textContent);
+      eq($('libBadge').textContent, '4 photos', 'the badge counts the photos', $('libBadge').textContent);
+
+      /* ==================================================== moving a photo
+         Ids hash the path, so a move reads as one photo leaving and another
+         arriving. The departed photo is marked, never deleted, so moving it
+         back brings it home -- which is the whole point of marking rather
+         than pruning. */
+      section('moving photos around');
+      return importPaths(files, [
+        'Photo library/beach_sunset.png',
+        'Photo library/2023 Spain/Beach.png',
+        'Photo library/Iceland 2024/aurora.png',
+        'Photo library/2024 Iceland/Beach.png'
+      ]);
+    }).then(function () {
+      var moved = lib.state();
+      eq(moved.present, 4, 'still four photos to play', moved.present);
+      eq(moved.missing, 1, 'the one that left is marked, not deleted', moved.missing);
+      eq(moved.total, 5, 'and kept on the books', moved.total);
+      eq(moved.missingPhotos[0].path, '2024 Iceland/aurora.png',
+         'the missing one is named', moved.missingPhotos[0].path);
+
+      var titles = lib.present().map(function (e) { return e.title; });
+      ok(titles.indexOf('aurora') !== -1, 'the moved photo is listed under its new folder',
+         titles.join(' | '));
+      ok(titles.indexOf('beach sunset') !== -1, 'and the untouched photos are unchanged',
+         titles.join(' | '));
+
+      // With a photo missing, the host must be told -- that is what the hint is for.
+      ok(!$('libHint').hidden, 'a missing photo is called out', $('libHint').textContent);
+      ok(/moved out/i.test($('libHint').textContent), 'and says what happened',
+         $('libHint').textContent);
+      ok(/not deleted/i.test($('libHint').textContent), 'and that it is safe',
+         $('libHint').textContent);
+
+      // Put it back, so the rest of the suite plays a stable library.
+      return importPaths(files, null);
+    }).then(function () {
+      // The moved-away record is still on the books, still marked. That is the
+      // point: the round trip works without ever deleting anything, and a
+      // folder that churns filenames cannot silently eat photos.
+      var back = lib.state();
+      eq(back.present, 4, 'moving it back makes all four playable again', back.present);
+      eq(back.missing, 1, 'and the departed record is still marked, not gone', back.missing);
+      eq(back.missingPhotos[0].path, 'Iceland 2024/aurora.png',
+         'the one left behind is the new path', back.missingPhotos[0].path);
+      ok(lib.present().some(function (e) { return e.title === 'aurora'; }),
+         'the photo is home again under its original path');
+
+      /* ========================================================= naming photos
+         A name the host types is theirs: disambiguation must never rewrite
+         it, even when it would collide with another photo. */
+      section('naming photos');
+      click($('btnLibrary'));
+      return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+    }).then(function () {
+      eq($('btnLibFinish').textContent, 'Close', 'the picker can be closed from the menu', $('btnLibFinish').textContent);
+
+      aurora = lib.present().filter(function (e) { return /aurora/.test(e.title); })[0];
+      ok(aurora, 'aurora is in the picker', aurora && aurora.title);
+      var card = q('.lib-card').filter(function (c) {
+        return /aurora/.test(c.querySelector('.lib-name').textContent);
+      })[0];
+      ok(card && card.querySelector('.lib-edit'), 'a library photo offers a rename');
+
+      click(card.querySelector('.lib-edit'));
+      return waitFor(function () { return !$('overlayEdit').hasAttribute('hidden'); }, 3000, 'the rename dialog');
+    }).then(function () {
+      eq($('editName').value, aurora.title, 'the dialog opens on the current name', $('editName').value);
+      eq($('editAliases').value, '', 'with no aliases yet', $('editAliases').value);
+
+      $('editName').value = 'Northern lights';
+      $('editAliases').value = 'aurora borealis, the lights';
+      click($('btnEditSave'));
+      return waitFor(function () { return $('overlayEdit').hasAttribute('hidden'); }, 3000, 'the rename dialog closing');
+    }).then(function () {
+      var edited = lib.present().filter(function (e) { return e.title === 'Northern lights'; })[0];
+      ok(edited, 'the photo now goes by the typed name');
+      ok(lib.details(edited.id).custom, 'and is remembered as hand-named');
+      ok(/the lights/.test(edited.title + JSON.stringify(edited.answers)), 'aliases kept', edited.answers.join(' / '));
+
+      // The aliases add to the title; the file stem stays legal too.
+      var accepted = ['Northern lights', 'aurora borealis', 'the lights', 'aurora'];
+      var got = accepted.filter(function (a) { return PD.isCorrect(a, edited.answers); });
+      eq(got.join(' | '), accepted.join(' | '), 'title, aliases and stem all identify it', got.join(' | '));
+      ok(!PD.isCorrect('Eiffel Tower', edited.answers), 'and nothing else does');
+
+      // A hand-typed name that collides must survive disambiguation.
+      var beachCard = q('.lib-card').filter(function (c) {
+        return c.querySelector('.lib-name').textContent === 'Beach';
+      })[0];
+      ok(beachCard, 'the plainly-named Beach is in the picker',
+         q('.lib-card').map(function (c) { return c.querySelector('.lib-name').textContent; }).join(' | '));
+      click(beachCard.querySelector('.lib-edit'));
+      return waitFor(function () { return !$('overlayEdit').hasAttribute('hidden'); }, 3000, 'the rename dialog');
+    }).then(function () {
+      $('editName').value = 'Beach';
+      $('editAliases').value = '';
+      click($('btnEditSave'));
+      return waitFor(function () { return $('overlayEdit').hasAttribute('hidden'); }, 3000, 'the rename dialog closing');
+    }).then(function () {
+      var titles = lib.present().map(function (e) { return e.title; }).sort();
+      eq(titles.filter(function (t) { return t === 'Beach'; }).length, 1,
+         'a typed name that clashes is left alone', titles.join(' | '));
+      ok(titles.indexOf('Northern lights') !== -1, 'and the other rename survived',
+         titles.join(' | '));
+
+      /* ============================================== starting from the library */
+      section('starting from the library');
+      click($('btnLibFinish'));
+      return waitFor(function () { return $('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker closing');
+    }).then(function () {
+      ok(/library/i.test($('btnStart').textContent), 'the start button names the source',
+         $('btnStart').textContent);
+      click($('btnStart'));
+      return waitFor(function () {
+        return PD.debug().phase === 'playing' && q('.piece').length === 30 && !flippedCount();
+      }, 6000, 'the board');
+    }).then(function () {
+      eq(PD.debug().deck, 4, 'the whole library is the deck', PD.debug().deck);
+      ok(!!PD.debug().current, 'a photo was dealt', PD.debug().current);
+      eq(PD.debug().found, 0, 'nothing identified yet', PD.debug().found);
+      eq(PD.debug().banked, 0, 'and the run starts at zero', PD.debug().banked);
+
+      /* ================================================ every card starts down
+         This is the whole premise: a photo the players have not seen yet. */
+      section('every card starts face down');
+      eq(q('.piece').length, 30, 'thirty cards', q('.piece').length);
+      eq(flippedCount(), 0, 'none face up', flippedCount());
+      // Every card is built with a face ready to paint into. What matters is
+      // that nothing has been painted: a face-down card must not leak a slice.
+      eq(q('.piece-back canvas').length, 0, 'card backs hold no canvas');
+      ok(q('.piece-front canvas').every(blank), 'and no card face shows a slice yet',
+         q('.piece-front canvas').filter(function (c) { return !blank(c); }).length + ' painted');
+      ok(/face down/i.test($('panelSub').textContent), 'the panel says so', $('panelSub').textContent);
+      ok($('stageEmpty') && !$('stageEmpty').hasAttribute('hidden'), 'the inspector starts empty');
+      eq($('tagPos').textContent, '—', 'with no position', $('tagPos').textContent);
+
+      /* =================================================== turning a card over */
+      section('turning a card over');
+      // Whatever the board advertises is what a turn must cost.
+      var price = parseInt($('pieceCostLabel').textContent.replace(/[^\d]/g, ''), 10);
+      ok(price > 0, 'the price of a turn is on show', $('pieceCostLabel').textContent);
+
+      var scoreBefore = PD.debug().live;
+      click(cardByPiece(3));
+      eq(flippedCount(), 1, 'one card is face up', flippedCount());
+      ok(cardByPiece(3).classList.contains('is-flipped'), 'and it is the one that was clicked');
+      eq(PD.debug().live, scoreBefore - price, 'it cost what the board said', String(PD.debug().live));
+      eq(PD.debug().inspected, 1, 'one card inspected', PD.debug().inspected);
+      ok(/R\d+ · C\d+/.test($('tagPos').textContent), 'the inspector names its true home',
+         $('tagPos').textContent);
+      eq(q('.piece-front canvas').filter(function (c) { return !blank(c); }).length, 1,
+         'exactly one card face is painted', q('.piece-front canvas').filter(function (c) { return !blank(c); }).length);
+
+      // Looking at the same card again is free.
+      var scoreAfter = PD.debug().live;
+      click(cardByPiece(3));
+      eq(PD.debug().live, scoreAfter, 'looking again costs nothing', String(PD.debug().live));
+      eq(flippedCount(), 1, 'and does not turn a second card', flippedCount());
+
+      // A second, different card costs again.
+      click(cardByPiece(11));
+      eq(flippedCount(), 2, 'a second card turns', flippedCount());
+      eq(PD.debug().live, scoreAfter - price, 'and is charged again', String(PD.debug().live));
+      eq(PD.debug().inspected, 2, 'two cards inspected', PD.debug().inspected);
+
+      /* =============================================== the slices are the photo
+         A card must show its own true region of the photo, at the right
+         scale. The fixtures are a 6x5 grid of flat colours, so sampling one
+         pixel of a card's canvas identifies which slice it is showing. */
+      section('slices match the photo');
+      var PAL = [[220,30,30],[30,200,60],[40,60,220],[240,200,20],[200,30,200],[30,200,200],
+                 [250,140,20],[120,40,180],[90,130,30],[20,90,130],[160,160,160],[250,120,170],
+                 [60,40,20],[140,200,120],[100,100,250],[230,230,120],[170,60,30],[40,160,170],
+                 [200,200,200],[120,10,10],[10,120,20],[10,20,120],[120,120,10],[80,80,80],
+                 [240,60,90],[20,180,190],[150,110,60],[70,60,200],[190,220,90],[250,250,250]];
+
+      // Read each piece's true (col,row) straight off the puzzle the game built.
+      var pz = PD.puzzle ? PD.puzzle() : null;
+      ok(!!pz, 'the puzzle is inspectable');
+      if (pz) {
+        var worst = 0, wrongPiece = -1, worstAt = '';
+        for (var id = 0; id < 30; id++) {
+          var piece = pz.get(id);
+          var want = PAL[piece.row * 6 + piece.col];
+          var cv = pz.canvasFor(piece, 40, 40, 'contain');
+          var got = pixelAt(cv, Math.floor(cv.width / 2), Math.floor(cv.height / 2));
+          var d = Math.max(Math.abs(got[0] - want[0]), Math.abs(got[1] - want[1]), Math.abs(got[2] - want[2]));
+          if (d > worst) { worst = d; wrongPiece = id; worstAt = 'R' + (piece.row+1) + 'C' + (piece.col+1); }
+        }
+        ok(worst <= 12, 'every piece shows its own true slice', 'worst channel error ' + worst + ' at ' + worstAt);
+      }
+
+      // And the board agrees with the puzzle, not just the puzzle with itself.
+      var boardPiece = pz && pz.get(3);
+      if (boardPiece) {
+        var boardCv = cardByPiece(3).querySelector('.piece-front canvas');
+        ok(!!boardCv, 'the turned card has a painted face');
+        if (boardCv) {
+          var wantB = PAL[boardPiece.row * 6 + boardPiece.col];
+          var gotB = pixelAt(boardCv, Math.floor(boardCv.width / 2), Math.floor(boardCv.height / 2));
+          var dB = Math.max(Math.abs(gotB[0] - wantB[0]), Math.abs(gotB[1] - wantB[1]), Math.abs(gotB[2] - wantB[2]));
+          ok(dB <= 12, 'the card on the board shows that slice too',
+             'err ' + dB + ' got ' + gotB.join(',') + ' want ' + wantB.join(','));
+        }
+      }
+
+      /* ================================================== how sharp are the cards
+         A card is a sixth of the photo, so a sixth of the stored photo has to
+         cover the card's own pixels. If it does not, every card is an
+         enlargement and the picture looks soft -- which is the whole reason
+         LONG_EDGE and Puzzle.SRC_W are pinned to a number. */
+      section('how sharp are the cards');
+      var pzS = PD.puzzle();
+      var cardW = cardByPiece(0).offsetWidth;
+      var dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+      // Integral first: a source that does not divide leaves seams on the cards.
+      eq(pzS.srcW % pzS.cols, 0, 'the source divides across the columns', pzS.srcW + '/' + pzS.cols);
+      eq(pzS.srcH % pzS.rows, 0, 'and down the rows', pzS.srcH + '/' + pzS.rows);
+
+      // The board is at most 1560 CSS px wide, so a card is about 180 CSS px.
+      // 360 device px on a 2x screen means six of them, and the source has to
+      // be at least that wide for a 2x display to be genuinely sharp.
+      ok(cardW <= 200, 'a card is about the size this budget assumes', cardW + ' CSS px');
+      ok(pzS.srcW >= 6 * 360,
+         'and the photo has a whole screenful of pixels per card',
+         Math.round(pzS.srcW / pzS.cols) + ' px per card, needs 360 on a 2x screen');
+
+      // The canvas behind each card is backed at the screen's own density, so
+      // the browser is not left scaling a blurry bitmap up to the card.
+      var turned = cardByPiece(3);
+      var tcv = turned.querySelector('.piece-front canvas');
+      ok(tcv.width >= turned.offsetWidth * dpr,
+         'each card canvas is backed at the screen density',
+         tcv.width + 'px for ' + turned.offsetWidth + ' CSS px at ' + dpr + 'x');
+
+      /* ============================================ a library cached too small
+         Photos cached by an older build were saved at a smaller size, which is
+         exactly what makes the cards soft. Rescanning has to notice that and
+         re-save them -- without losing the names the host gave them. */
+      section('a library cached too small');
+
+      // And the stored photo is big enough to feed that source.
+      var victim = lib.present().filter(function (e) { return e.title === 'Beach'; })[0];
+      var pristine = null;
+      return getRecord(lib.present()[0].id)
+        .then(function (rec) {
+          eq(rec.edge, pzS.srcW,
+             'the photo is cached at the resolution the puzzle renders',
+             rec.edge + ' vs ' + pzS.srcW);
+          ok(Math.max(rec.w, rec.h) <= pzS.srcW,
+             'and never stores more pixels than the puzzle renders',
+             rec.w + 'x' + rec.h);
+          return getRecord(victim.id);
+        })
+        .then(function (rec) { pristine = rec; })
+        .then(function () { return lib.rename(victim.id, 'Renamed For The Test', 'rfTT'); })
+        .then(function (rec) {
+          // Straight into the store, the way a cache from an older build looks.
+          rec.edge = 1200;
+          rec.w = 800;
+          rec.h = 600;
+          return putRecord(rec).then(function () { return lib.init(); });
+        })
+        .then(function () {
+          eq(lib.details(victim.id).title, 'Renamed For The Test',
+             'the rename is still there before the rescan', lib.details(victim.id).title);
+          return importPaths(files, null);
+        })
+        .then(function (r) {
+          eq(r.sharpened, 1, 'the rescan re-saved exactly that one', r.sharpened);
+          eq(r.added, 0, 'and treated it as an existing photo, not a new one', r.added);
+          eq(r.skipped, 3, 'leaving the others alone', r.skipped);
+          return getRecord(victim.id);
+        })
+        .then(function (rec) {
+          eq(rec.edge, pzS.srcW, 'the photo is cached at the full size now', rec.edge);
+          eq(rec.w + 'x' + rec.h, pristine.w + 'x' + pristine.h,
+             'and re-saved as it is, neither enlarged nor cropped',
+             rec.w + 'x' + rec.h);
+          eq(lib.details(victim.id).title, 'Renamed For The Test',
+             'and the rename survived the re-save', lib.details(victim.id).title);
+          ok(lib.details(victim.id).aliases.indexOf('rfTT') !== -1,
+             'as did its alias', lib.details(victim.id).aliases.join(' / '));
+        })
+        /* ================================================ a photo replaced on disk
+           The obvious cure for a soft photo is to put a larger one in its
+           place. The path and the name are unchanged, so a scan that only
+           watched those would leave the old soft pixels cached forever. */
+        .then(function () {
+          // present() gives the deck entry, which has no path on it; the store
+          // does, and that is what says which file is being replaced.
+          return swapPhoto(files, lib.details(victim.id).path, 200);
+        })
+        .then(function (swap) {
+          swapSize = swap.size;
+          return importPaths(swap.items, null);
+        })
+        .then(function (r) {
+          eq(r.replaced, 1, 'the swapped photo is read again', r.replaced);
+          eq(r.sharpened, 0, 'and not counted as a re-save', r.sharpened);
+          eq(r.added, 0, 'nor as a new photo', r.added);
+          eq(r.skipped, 3, 'the other three are left alone', r.skipped);
+          return getRecord(victim.id);
+        })
+        .then(function (rec) {
+          eq(rec.w, 200, 'the cached pixels are the new ones', rec.w + 'x' + rec.h);
+          eq(rec.size, swapSize, 'and the file size is remembered', rec.size);
+          eq(lib.details(victim.id).title, 'Renamed For The Test',
+             'while the name the host gave it survives', lib.details(victim.id).title);
+        })
+        .then(function () {
+          // Put the record back exactly as it was, so the sections after this
+          // see the library they expect.
+          return putRecord(pristine).then(function () { return lib.init(); });
+        })
+        .then(function () {
+          // And a scan of the original folder is a no-op again, which is what
+          // tells us the size is recorded rather than merely compared.
+          return importPaths(files, null);
+        })
+        .then(function (r) {
+          eq(r.replaced, 0, 'an unchanged folder is left alone', r.replaced);
+          eq(r.skipped, 4, 'every photo of it', r.skipped);
+        })
+        .then(function () {
+          // Compared against what was there rather than against false: an
+          // earlier section has already renamed photos in this library, so
+          // "custom" is not a fixed thing here.
+          eq(lib.details(victim.id).title, pristine.title, 'and the library is as it was',
+             lib.details(victim.id).title + ' was ' + pristine.title);
+          eq(lib.details(victim.id).custom, pristine.custom, 'renamed flag and all',
+             String(lib.details(victim.id).custom));
+        });
+    }).then(function () {
+      /* ============================================== the host picks the photo
+           The deck is shuffled, so the host says which photo this round is
+           about and plays that one. */
+        section('host picks the photo for this round');
+        click($('btnLibrary'));
+        return waitFor(function () {
+          return !$('overlayLibrary').hasAttribute('hidden');
+        }, 3000, 'the picker');
+      }).then(function () {
+      target = null;
+      var cards2 = q('.lib-card');
+      for (var i = 0; i < cards2.length; i++) {
+        if (cards2[i].querySelector('.lib-name').textContent === 'Northern lights') { target = cards2[i]; break; }
+      }
+      ok(target, 'the renamed photo is listed by its new name');
+      LINES.push('  (was playing: ' + PD.debug().current + ')');
+      click(target);
+      return waitForRound('Northern lights');
+    }).then(function () {
+      eq(PD.debug().current, 'Northern lights', 'the host\'s choice is the round now', PD.debug().current);
+      eq(flippedCount(), 0, 'its cards start face down too', flippedCount());
+      eq(PD.debug().flipped, 0, 'nothing turned yet', PD.debug().flipped);
+      ok(/face down/i.test($('panelSub').textContent), 'the panel says so', $('panelSub').textContent);
+      ok(q('.overlay:not([hidden])').length === 0, 'the picker closed cleanly',
+         q('.overlay:not([hidden])').length);
+
+      /* ======================================================= the host wins */
+      section('Game complete');
+      $('answerInput').value = 'the northern lights';
+      click($('btnComplete'));
+      return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
+    }).then(function () {
+      eq($('revealTitle').textContent, 'Northern lights', 'the reveal names the photo', $('revealTitle').textContent);
+      ok(/^Identified/.test($('revealEyebrow').textContent), 'and marks it identified', $('revealEyebrow').textContent);
+      ok($('revealImg').src.indexOf('data:image/') === 0, 'the whole photo is shown');
+      ok($('scorecard').rows.length >= 3, 'the scorecard has lines', String($('scorecard').rows.length));
+
+      var heard = Array.prototype.map.call($('scorecard').rows, function (tr) { return tr.textContent; })
+        .filter(function (t) { return /they said/i.test(t); })[0] || '';
+      ok(/northern lights/i.test(heard), 'what was said aloud is written down', heard);
+
+      dbg1 = PD.debug();
+      eq(dbg1.found, 1, 'one photo identified', dbg1.found);
+      ok(dbg1.banked > 0, 'and points banked', String(dbg1.banked));
+
+      /* ============================== the next game is what the host reaches for
+         This is the flow that was broken: pressing Game complete used to
+         replay the same photo forever, so a second game never got a new one.
+         The button says "Next game" and no more -- the players are looking at
+         this card too, and a title would tell them what is coming next. */
+      section('next game, straight from the reveal card');
+      ok(!$('btnNext').hasAttribute('hidden'), 'the reveal offers another game');
+      eq($('btnNext').textContent, 'Next game',
+         'labelled without naming the photo, so the players cannot read ahead',
+         $('btnNext').textContent);
+      ok(!/\S/.test($('btnNext').textContent.replace(/Next game/, '')),
+         'and there is no title hidden anywhere in the label', $('btnNext').textContent);
+      ok(D.activeElement === $('btnNext'), 'and holds focus, so Enter works', D.activeElement.id);
+      ok($('btnNext').className.indexOf('btn--primary') !== -1, 'it is the primary action');
+      ok($('btnReplay').className.indexOf('btn--primary') === -1, 'the same photo is not');
+      ok($('btnReplay').textContent.indexOf('same photo') !== -1, 'but it is still offered',
+         $('btnReplay').textContent);
+      ok($('btnPick').textContent.indexOf('another photo') !== -1, 'and so is picking one',
+         $('btnPick').textContent);
+
+      // Nothing on the card says which photo is coming, so the only thing left
+      // to check is that pressing the button deals a different one.
+      click($('btnNext'));
+      return waitForNewRound(dbg1.current);
+    }).then(function () {
+      nextTitle = PD.debug().current;
+      ok(nextTitle && nextTitle !== dbg1.current, 'the second game deals a different photo', nextTitle);
+      // Against the library, not against the deck: the deck is the snapshot the
+      // run was dealt from, while the photo on the board carries whatever name
+      // the library holds now. Earlier sections rename photos, so those two can
+      // legitimately differ.
+      ok(lib.present().some(function (e) { return e.title === nextTitle; }),
+         'one from the folder', nextTitle);
+      eq($('overlayReveal').hasAttribute('hidden'), true, 'the reveal card is gone');
+      eq(q('.overlay:not([hidden])').length, 0, 'no overlay left open', q('.overlay:not([hidden])').length);
+      eq(PD.debug().found, 1, 'the identified photo still counts', PD.debug().found);
+      ok(PD.debug().banked > 0, 'the banked score carried over', String(PD.debug().banked));
+      ok(/face down/i.test($('panelSub').textContent), 'all face down again', $('panelSub').textContent);
+
+      // Loaded is not the same as playable.
+      click(cardByPiece(3));
+      eq(flippedCount(), 1, 'the second game is playable', flippedCount());
+
+      /* ============================================ and the same photo on demand */
+      section('another run, same photo');
+      photoBefore = nextTitle;
+      eq($('btnNext') && true, true, 'the reveal is still reachable after playing');
+      $('answerInput').value = 'a guess at the second photo';
+      click($('btnComplete'));
+      return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
+    }).then(function () {
+      eq($('revealTitle').textContent, photoBefore, 'the second reveal names the second photo',
+         $('revealTitle').textContent);
+      eq(PD.debug().found, 2, 'two photos identified in one run', PD.debug().found);
+      ok(!$('btnNext').hasAttribute('hidden'), 'a third photo is offered too');
+      ok(D.activeElement === $('btnNext'), 'and focused again', D.activeElement.id);
+
+      orderBefore = q('.piece').map(function (c) { return c.dataset.piece; }).join(',');
+      click($('btnReplay'));
+      return waitForRound(photoBefore);
+    }).then(function () {
+      var d = PD.debug();
+      eq(d.phase, 'playing', 'back in play', d.phase);
+      eq(d.current, photoBefore, 'same photo, a new run', d.current);
+      eq(d.found, 2, 'both identified photos still count', d.found);
+      eq(flippedCount(), 0, 'all cards face down again', flippedCount());
+      eq(q('.piece.is-flipped').length, 0, 'no card left turned', q('.piece.is-flipped').length);
+      ok(q('.piece-front canvas').every(blank), 'and no stale slice left showing from the old round',
+         q('.piece-front canvas').filter(function (c) { return !blank(c); }).length + ' still painted');
+      ok(q('.piece').map(function (c) { return c.dataset.piece; }).join(',') !== orderBefore,
+         'the cards are shuffled differently');
+      ok(d.banked > 0, 'banked score survived the new round', String(d.banked));
+
+      /* ============================================ choosing, mid-round
+         The host can also jump straight to any photo without finishing the
+         round they are in. */
+      section('choosing another photo');
+      click($('btnLibrary'));
+      return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+    }).then(function () {
+      eq($('btnLibFinish').textContent, 'End the run', 'the picker offers to end the run', $('btnLibFinish').textContent);
+      other = null;
+      var cards = q('.lib-card').filter(function (c) {
+        return c.querySelector('.lib-name').textContent !== photoBefore;
+      });
+      for (var j = 0; j < cards.length; j++) {
+        if (cards[j].querySelector('.lib-edit')) { other = cards[j]; break; }
+      }
+      ok(other, 'another library photo is on offer');
+      otherTitle = other.querySelector('.lib-name').textContent;
+      click(other);
+      return waitForRound(otherTitle);
+    }).then(function () {
+      eq(PD.debug().current, otherTitle, 'the chosen photo is played', PD.debug().current);
+      eq(q('.overlay:not([hidden])').length, 0, 'and the picker closed', q('.overlay:not([hidden])').length);
+      eq(flippedCount(), 0, 'face down', flippedCount());
+      eq($('overlayLibrary').hasAttribute('hidden'), true, 'picker hidden');
+
+      // The picker filters, which is how a big library stays usable.
+      click($('btnLibrary'));
+      return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+    }).then(function () {
+      var all = q('.lib-card').length;
+      $('libSearch').value = 'northern';
+      $('libSearch').dispatchEvent(new Event('input', { bubbles: true }));
+      return waitFor(function () { return q('.lib-card').length < all; }, 3000, 'the search to narrow').then(function () {
+        eq(q('.lib-card').length, 1, 'search narrows the list', q('.lib-card').length);
+        $('libSearch').value = '';
+        $('libSearch').dispatchEvent(new Event('input', { bubbles: true }));
+        return waitFor(function () { return q('.lib-card').length === all; }, 3000, 'the search clearing');
+      });
+    }).then(function () {
+      click($('btnLibFinish'));
+      return waitFor(function () { return !$('overlayOver').hasAttribute('hidden'); }, 4000, 'the results');
+    }).then(function () {
+      eq($('overlayLibrary').hasAttribute('hidden'), true, 'ending the run closes the picker');
+      ok(q('#overTally li').length >= 4, 'the tally is rendered', String(q('#overTally li').length));
+      ok(q('#overPhotos li').length >= 1, 'the rounds are listed', String(q('#overPhotos li').length));
+      ok(/^\d[\d,]*$/.test($('finalScore').textContent), 'the final score is a number', $('finalScore').textContent);
+    });
+  }).then(function () {
+    /* ================================================ a different photo, mid-run
+       The picker is how a host jumps to another photo without ending the run.
+       Everything it offers comes out of the library folder -- there is
+       nothing else to offer. */
+    section('a different photo mid-run');
+    eq($('overlayOver').hasAttribute('hidden'), false, 'the results are up first');
+
+    click($('btnAgain'));
+    return waitFor(function () {
+      return PD.debug().phase === 'playing' && q('.piece').length === 30 && !flippedCount();
+    }, 6000, 'a new run from the results');
+  }).then(function () {
+    ok(PD.debug().deck >= 4, 'the deck came back', String(PD.debug().deck));
+    eq(flippedCount(), 0, 'face down to start', flippedCount());
+
+    click($('btnLibrary'));
+    return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+  }).then(function () {
+    eq(q('.lib-card').length, PD.debug().deck, 'the picker offers the whole library',
+       q('.lib-card').length);
+    eq(q('.lib-card.is-current').length, 1, 'and marks the one in play',
+       String(q('.lib-card.is-current').length));
+    eq(q('.lib-card').filter(function (c) { return !c.querySelector('.lib-edit'); }).length, 0,
+       'every one of them is a photo from the folder', 'all editable');
+    eq(q('.lib-section').length, 1, 'listed under the folder name', q('.lib-section').length);
+    eq(q('.lib-section')[0].textContent, 'Photo library', 'which is the folder',
+       q('.lib-section')[0].textContent);
+
+    // Pick one that is not the photo already in play.
+    var cards = q('.lib-card');
+    for (var i = 0; i < cards.length; i++) {
+      if (!cards[i].classList.contains('is-current')) { target = cards[i]; break; }
+    }
+    ok(target, 'a different photo is offered');
+    otherTitle = target.querySelector('.lib-name').textContent;
+    click(target);
+    return waitForRound(otherTitle);
+  }).then(function () {
+    eq(PD.debug().current, otherTitle, 'a photo from the folder plays instead', otherTitle);
+    eq(flippedCount(), 0, 'and starts face down', flippedCount());
+    click(cardByPiece(14));
+    eq(flippedCount(), 1, 'and its cards turn', flippedCount());
+    ok(/R\d+ · C\d+/.test($('tagPos').textContent), 'with a true home', $('tagPos').textContent);
+
+    /* ====================================================== intel still works */
+    section('intel');
+    var liveB = PD.debug().live;
+    click($('toolCategory'));
+    ok(/category/i.test($('feedback').textContent), 'the category hint is free',
+       $('feedback').textContent);
+    eq(PD.debug().live, liveB, 'and costs nothing', String(PD.debug().live));
+
+    var revealPrice = parseInt($('costReveal').textContent.replace(/[^\d]/g, ''), 10);
+    liveB = PD.debug().live;
+    click($('toolReveal'));
+    eq(PD.debug().live, liveB - revealPrice,
+       'turning a card over for them costs what the tool says', String(PD.debug().live) + ' vs ' + revealPrice);
+    eq(flippedCount(), 2, 'and turns one', flippedCount());
+    ok(D.querySelector('.piece.is-free'), 'the free-turned card is marked as free');
+
+    /* ====================================================== the strike path
+       "Not it" is how a wrong guess is recorded, so the limited-guesses rule
+       still bites. It is a different action from Game complete. */
+    section('not it takes a strike');
+    var wrongBefore = PD.debug().wrong;
+    $('answerInput').value = 'definitely not this';
+    click($('btnWrong'));
+    eq(PD.debug().wrong, wrongBefore + 1, 'a strike is taken', String(PD.debug().wrong));
+    eq($('answerInput').value, '', 'and the answer box is cleared', $('answerInput').value);
+    ok(/try|tries|guess/i.test($('feedback').textContent), 'and the host is told',
+       $('feedback').textContent);
+    eq(PD.debug().phase, 'playing', 'the round carries on', PD.debug().phase);
+    eq($('overlayReveal').hasAttribute('hidden'), true, 'no reveal card', true);
+
+    /* ========================================================== ending a run */
+    section('ending the run');
+    click($('btnLibrary'));
+    return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+  }).then(function () {
+    click($('btnLibFinish'));
+    return waitFor(function () { return !$('overlayOver').hasAttribute('hidden'); }, 4000, 'the results');
+  }).then(function () {
+    eq($('overlayLibrary').hasAttribute('hidden'), true, 'the picker closed with the results');
+    ok(q('#overTally li').length >= 4, 'the tally is rendered', String(q('#overTally li').length));
+    ok(q('#overPhotos li').length >= 1, 'the rounds played are listed', String(q('#overPhotos li').length));
+    ok(/^\d[\d,]*$/.test($('finalScore').textContent), 'the final score is a number', $('finalScore').textContent);
+
+    /* ========================================== a deck of just one photo
+       With nothing to move on to there is no "next photo" to offer, so the
+       same photo has to be the primary way on or the host is stuck. */
+    section('a run with only one photo');
+    var one = D.createElement('canvas');
+    one.width = 120; one.height = 90;
+    var ctx = one.getContext('2d');
+    ctx.fillStyle = '#3af'; ctx.fillRect(0, 0, 60, 90);
+    ctx.fillStyle = '#f80'; ctx.fillRect(60, 0, 60, 90);
+    ok(PD.playCustom(one.toDataURL('image/png'), 'Solo Shot', 'casual'), 'a one-photo run starts');
+    return waitForRound('Solo Shot');
+  }).then(function () {
+    eq(PD.debug().deck, 1, 'the deck holds one photo', PD.debug().deck);
+    eq(flippedCount(), 0, 'face down', flippedCount());
+
+    click($('btnComplete'));
+    return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
+  }).then(function () {
+    ok($('btnNext').hasAttribute('hidden'), 'no next photo is offered', $('btnNext').textContent);
+    ok(!$('btnReplay').hasAttribute('hidden'), 'the same photo is on offer');
+    ok($('btnReplay').className.indexOf('btn--primary') !== -1, 'and it is the primary action');
+    eq(D.activeElement.id, 'btnReplay', 'and it has focus', D.activeElement.id);
+
+    click($('btnReplay'));
+    return waitForRound('Solo Shot');
+  }).then(function () {
+    eq(PD.debug().current, 'Solo Shot', 'the same photo plays again', PD.debug().current);
+    eq(PD.debug().phase, 'playing', 'and it is playable', PD.debug().phase);
+    eq(PD.debug().found, 1, 'the round counted', String(PD.debug().found));
+
+    /* =============================== easy mode: the photo stays whole
+       A second game mode for a different crowd: same photo, same 30 pieces,
+       but every piece sits where it belongs. Players reveal up to 12 pieces
+       in place; everything after "Game complete" matches the advanced game. */
+    section('easy mode — the photo stays whole');
+    var easyBtn = q('#modePicker button[data-mode="easy"]')[0];
+    ok(!!easyBtn, 'the mode picker offers Easy');
+    click(easyBtn);
+    eq($('modePicker').querySelector('[aria-checked="true"]').dataset.mode, 'easy',
+       'and picking it selects it', 'easy');
+    PD.start('casual', 'easy');
+    return waitForBoard(function () {
+      return PD.debug().phase === 'playing' && q('.piece').length === 30 && !flippedCount();
+    }, 'the easy board');
+  }).then(function () {
+    eq(PD.debug().mode, 'easy', 'the run is in easy mode', PD.debug().mode);
+
+    // The whole point: the board is the photo. Pieces map slot -> true place.
+    var pzE = PD.puzzle();
+    ok(!!pzE, 'the easy puzzle is inspectable');
+    eq(pzE.pieces.length, 30, 'thirty pieces', pzE.pieces.length);
+    var inPlace = true;
+    for (var pi = 0; pi < pzE.pieces.length; pi++) {
+      if (pzE.pieces[pi].id !== pi) { inPlace = false; break; }
+    }
+    ok(inPlace, 'every piece sits in its true position');
+
+    // Every card carries a visible 1-30 label, so players can name a card.
+    var labelsOk = true;
+    for (var li = 0; li < 30; li++) {
+      var lbl = cardByPiece(li).querySelector('.piece-num');
+      if (!lbl || lbl.textContent !== String(li + 1)) { labelsOk = false; break; }
+    }
+    ok(labelsOk, 'pieces are labelled 1 through 30');
+
+    // The advanced trapping is hidden: no inspector window, no intel.
+    ok($('inspectorCard').hasAttribute('hidden'), 'no inspector card in easy mode');
+    ok($('intelCard').hasAttribute('hidden'), 'no intel tools in easy mode');
+    ok($('legendSelectedWrap').hasAttribute('hidden'), 'no selection legend');
+    eq($('legendSeen').textContent, 'revealed', 'the legend says revealed', $('legendSeen').textContent);
+    eq($('statPiecesLabel').textContent, 'Revealed', 'the stat is renamed', $('statPiecesLabel').textContent);
+    eq($('statPieces').textContent, '0 / 12', 'and counts to 12', $('statPieces').textContent);
+    ok(/whole/i.test($('panelTitle').textContent), 'the panel title says the photo is whole',
+       $('panelTitle').textContent);
+
+    // Revealing in place, charged like any first look.
+    var priceE = parseInt($('pieceCostLabel').textContent.replace(/[^\d]/g, ''), 10);
+    var liveBefore = PD.debug().live;
+    click(cardByPiece(5));
+    eq(cardByPiece(5).classList.contains('is-flipped'), true, 'the clicked piece reveals');
+    eq(flippedCount(), 1, 'one piece up', flippedCount());
+    eq(PD.debug().live, liveBefore - priceE, 'it cost what the board said', String(PD.debug().live));
+    eq($('statPieces').textContent, '1 / 12', 'the readout tracks it', $('statPieces').textContent);
+    ok($('cross').hasAttribute('hidden'), 'and no inspector opens');
+
+    // Looking again is free.
+    var liveAfter = PD.debug().live;
+    click(cardByPiece(5));
+    eq(PD.debug().live, liveAfter, 're-revealing is free', String(PD.debug().live));
+    eq(flippedCount(), 1, 'and nothing else turns', flippedCount());
+
+    // Reveal up to the cap; the 13th is refused.
+    for (var r = 0; r < 30 && flippedCount() < 12; r++) {
+      if (r === 5) continue;
+      click(cardByPiece(r));
+    }
+    eq(flippedCount(), 12, 'twelve pieces revealed', flippedCount());
+    eq($('statPieces').textContent, '12 / 12', 'and the cap is shown', $('statPieces').textContent);
+    var liveAtCap = PD.debug().live;
+    var spare = null;
+    for (var s = 0; s < 30; s++) {
+      if (!cardByPiece(s).classList.contains('is-flipped')) { spare = cardByPiece(s); break; }
+    }
+    ok(!!spare, 'a thirteenth piece is still face down');
+    click(spare);
+    eq(flippedCount(), 12, 'but it will not turn', flippedCount());
+    eq(PD.debug().live, liveAtCap, 'and nothing is charged', String(PD.debug().live));
+    ok(/name the photo/i.test($('feedback').textContent), 'it asks for the name instead',
+       $('feedback').textContent);
+
+    // Game complete runs exactly like the advanced game.
+    var easyInPlay = PD.debug().current;
+    click($('btnComplete'));
+    return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
+  }).then(function () {
+    eq($('revealTitle').textContent, PD.debug().current, 'the reveal shows the photo dealt',
+       $('revealTitle').textContent);
+    eq($('btnNext').textContent, 'Next game', 'labelled without the photo name', $('btnNext').textContent);
+    var prevEasy = PD.debug().current;
+    click($('btnNext'));
+    return waitForNewRound(prevEasy);
+  }).then(function () {
+    eq(PD.debug().mode, 'easy', 'the next round is still easy', PD.debug().mode);
+    var pzN = PD.puzzle();
+    var inPlaceN = true;
+    for (var ni = 0; ni < pzN.pieces.length; ni++) {
+      if (pzN.pieces[ni].id !== ni) { inPlaceN = false; break; }
+    }
+    ok(inPlaceN, 'and the next photo stays whole on the board');
+    eq(flippedCount(), 0, 'all face down again', flippedCount());
+    eq($('statPieces').textContent, '0 / 12', 'with a fresh reveal budget', $('statPieces').textContent);
+  }).catch(function (err) {
+    bail('chain', err);
+  }).then(function () { finish(); });
+})();
+</script>
+</body>
+</html>

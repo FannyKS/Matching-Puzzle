@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Photo Detective — name the picture from 30 pieces</title>
+<meta name="description" content="A photo is cut into 30 shuffled cards. Flip as few as you dare, then name what you are looking at." />
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' view='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>" />
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- ─────────────  TOP BAR  ───────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🔍</span>
+      <span class="brand-text">Photo<b>Detective</b></span>
+    </div>
+
+    <div class="stats" id="stats">
+      <div class="stat">
+        <span class="stat-label">Score</span>
+        <span class="stat-value" id="statScore">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Identified</span>
+        <span class="stat-value" id="statFound">0 / 6</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label" id="statPiecesLabel">Flipped</span>
+        <span class="stat-value" id="statPieces">0</span>
+      </div>
+      <div class="stat stat--timer" id="statTimerBox">
+        <span class="stat-label">Time</span>
+        <span class="stat-value" id="statTime">0:00</span>
+      </div>
+      <div class="stat stat--strikes" title="Wrong guesses on this photo">
+        <span class="stat-label">Strikes</span>
+        <span class="stat-value" id="statStrikes">
+          <i class="pip"></i><i class="pip"></i><i class="pip"></i>
+        </span>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="icon-btn icon-btn--wide" id="btnLibrary" type="button" title="Photo library">
+        <span aria-hidden="true">🗂</span><span id="libBadge">Library</span>
+      </button>
+      <button class="icon-btn" id="btnSound" type="button" aria-pressed="true" title="Toggle sound">
+        <span id="soundIcon">🔊</span>
+      </button>
+      <button class="icon-btn" id="btnHelp" type="button" title="How to play">?</button>
+    </div>
+  </header>
+
+  <!-- ─────────────  GAME  ───────────── -->
+  <main class="layout" id="layout" hidden>
+
+    <!-- board -->
+    <section class="board-panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title" id="panelTitle">The photo, cut into <b>30</b> cards</h2>
+          <p class="panel-sub" id="panelSub">All cards are face down. Flip one to look at it.</p>
+        </div>
+        <div class="piece-cost" title="Cost of flipping one new card">
+          <span id="pieceCostLabel">−12</span><span class="piece-cost-unit" id="pieceCostUnit">/ card</span>
+        </div>
+      </div>
+
+      <div class="board-wrap">
+        <div class="board" id="board" role="group" aria-label="Photo cards, all face down"></div>
+      </div>
+
+      <div class="board-foot">
+        <span class="legend"><i class="swatch swatch--seen"></i> <span id="legendSeen">flipped</span></span>
+        <span class="legend" id="legendSelectedWrap"><i class="swatch swatch--cur"></i> selected</span>
+        <span class="spacer"></span>
+        <span class="board-foot-hint" id="boardHint">Tip: read the edges and corners first — the middle is always the same idea.</span>
+      </div>
+    </section>
+
+    <!-- sidebar -->
+    <aside class="side">
+
+      <div class="card inspector" id="inspectorCard">
+        <div class="card-head">
+          <h3>Inspector</h3>
+          <label class="switch">
+            <input type="checkbox" id="chkContext" checked />
+            <span>Show neighbours</span>
+          </label>
+        </div>
+
+        <div class="stage" id="stage">
+          <div class="stage-empty" id="stageEmpty">
+            <span class="stage-empty-mark" aria-hidden="true">🖼</span>
+            <p>Flip any card to examine it closely.</p>
+          </div>
+          <div class="cross" id="cross" hidden>
+            <div class="cross-slot cross-slot--up"    data-pos="up"></div>
+            <div class="cross-slot cross-slot--left"  data-pos="left"></div>
+            <div class="cross-slot cross-slot--main"  data-pos="main"></div>
+            <div class="cross-slot cross-slot--right" data-pos="right"></div>
+            <div class="cross-slot cross-slot--down"  data-pos="down"></div>
+          </div>
+        </div>
+
+        <div class="stage-meta" id="stageMeta">
+          <span class="tag" id="tagPos">—</span>
+          <span class="tag tag--muted" id="tagCost"></span>
+        </div>
+      </div>
+
+      <div class="card answer">
+        <div class="card-head">
+          <h3>Name it</h3>
+          <span class="card-hint">host controls</span>
+        </div>
+
+        <p class="host-note">Players call the photo out loud. The host presses <b>Game&nbsp;complete</b> when they get it.</p>
+
+        <div class="answer-row">
+          <button class="mic-btn" id="btnMic" type="button" aria-label="Listen for the spoken answer" title="Listen for the spoken answer">
+            <span class="mic-glyph" aria-hidden="true">🎙</span>
+          </button>
+          <input id="answerInput" type="text" placeholder="Optional — type what they said…" aria-label="What the players said" />
+        </div>
+        <p class="mic-note" id="micNote" hidden></p>
+
+        <button class="btn btn--primary btn--big" id="btnComplete" type="button">Game complete</button>
+        <button class="btn btn--quiet btn--wide" id="btnWrong" type="button">Not it — take a strike</button>
+
+        <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="card intel" id="intelCard">
+        <h3>Intel <span class="card-hint">costs points</span></h3>
+        <div class="tools">
+          <button class="tool" id="toolCategory" type="button" disabled>
+            <span class="tool-name">Category</span>
+            <span class="tool-desc">Where does it belong?</span>
+            <span class="tool-cost is-free">free</span>
+          </button>
+          <button class="tool" id="toolReveal" type="button" disabled>
+            <span class="tool-name">Turn one over</span>
+            <span class="tool-desc">Flip 1 card for them</span>
+            <span class="tool-cost">−<span id="costReveal">150</span></span>
+          </button>
+          <button class="tool" id="toolChoices" type="button" disabled>
+            <span class="tool-name">Narrow it down</span>
+            <span class="tool-desc">Pick from 3 options</span>
+            <span class="tool-cost">−<span id="costChoices">200</span></span>
+          </button>
+          <button class="tool" id="toolSurrender" type="button" disabled>
+            <span class="tool-name">Give up</span>
+            <span class="tool-desc">Reveal photo, end the run</span>
+            <span class="tool-cost">run over</span>
+          </button>
+        </div>
+        <div class="choices" id="choices" hidden></div>
+      </div>
+
+    </aside>
+  </main>
+</div>
+
+<!-- ─────────────  OVERLAYS  ─────────────  -->
+
+<!-- start -->
+<div class="overlay" id="overlayStart">
+  <div class="modal modal--start">
+    <p class="eyebrow">A picture, cut into 30 cards</p>
+    <h1 class="title">Photo<span>Detective</span></h1>
+    <p class="lede" id="startLede">
+      Thirty cards, all face down. Flip as few as you dare, work out what you are
+      looking at, and say the name before your guesses or your time run out.
+    </p>
+
+    <div class="rules" id="startRules">
+      <div class="rule"><span class="rule-num">1</span><p id="rule1">Flip a card to see it. <b>Every new card you turn costs points.</b> Flipping one you have already seen is free.</p></div>
+      <div class="rule"><span class="rule-num">2</span><p id="rule2">Players shout the name out loud. The host presses <b>Game complete</b>.</p></div>
+      <div class="rule"><span class="rule-num">3</span><p id="rule3">Wrong guesses cost you. <b>Out of guesses or out of time, the run ends.</b></p></div>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Game mode</span>
+      <div class="segmented segmented--2" id="modePicker" role="radiogroup" aria-label="Game mode">
+        <button type="button" role="radio" aria-checked="true" data-mode="advance">
+          <b>Advanced</b><small>30 scrambled cards · inspector</small>
+        </button>
+        <button type="button" role="radio" aria-checked="false" data-mode="easy">
+          <b>Easy</b><small>Photo, whole · reveal 12 pieces</small>
+        </button>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Difficulty</span>
+      <div class="segmented" id="diffPicker" role="radiogroup" aria-label="Difficulty">
+        <button type="button" role="radio" aria-checked="false" data-diff="casual">
+          <b>Casual</b><small>No clock · 5 guesses</small>
+        </button>
+        <button type="button" role="radio" aria-checked="true"  data-diff="standard">
+          <b>Standard</b><small>4:00 · 3 guesses</small>
+        </button>
+        <button type="button" role="radio" aria-checked="false" data-diff="hard">
+          <b>Hard</b><small>2:30 · 2 guesses · ×2 cost</small>
+        </button>
+      </div>
+    </div>
+
+    <button class="btn btn--primary btn--big" id="btnStart" type="button">Choose your Photo library folder</button>
+
+    <div class="start-foot">
+      <button class="linkish" id="btnStartUpload" type="button">Just one photo this time →</button>
+    </div>
+  </div>
+</div>
+
+<!-- photo library -->
+<div class="overlay" id="overlayLibrary" hidden>
+  <div class="modal modal--wide">
+    <p class="eyebrow" id="libEyebrow">Photo library</p>
+    <h2 class="reveal-title" id="libTitle">Choose a photo</h2>
+
+    <div class="lib-bar">
+      <span class="lib-count" id="libCount">No folder chosen yet.</span>
+      <span class="spacer"></span>
+      <button class="btn btn--quiet" id="btnLibRescan" type="button" hidden>Rescan folder</button>
+      <button class="btn btn--quiet" id="btnLibFolder" type="button">Choose folder…</button>
+    </div>
+
+    <input class="text-input lib-search" id="libSearch" type="search" placeholder="Search photos…" aria-label="Search photos" />
+
+    <div class="lib-drop" id="libDrop">
+      <div class="lib-grid" id="libGrid"></div>
+      <div class="lib-empty" id="libEmpty">
+        <span class="lib-empty-mark" aria-hidden="true">🗂</span>
+        <p><b>Point the game at a folder of photos.</b><br />Pick it below, or drag the whole folder onto this box.</p>
+      </div>
+    </div>
+
+    <p class="lib-hint" id="libHint" hidden></p>
+
+    <div class="modal-actions">
+      <button class="btn btn--ghost" id="btnLibClose" type="button">Close</button>
+      <button class="btn btn--primary" id="btnLibFinish" type="button">End the run</button>
+    </div>
+  </div>
+</div>
+
+<!-- edit one photo -->
+<div class="overlay" id="overlayEdit" hidden>
+  <div class="modal">
+    <p class="eyebrow">Name this photo</p>
+    <h2 class="reveal-title" id="editHeading">Edit</h2>
+    <figure class="edit-figure"><img id="editPreview" alt="" /></figure>
+    <p class="edit-path" id="editPath"></p>
+
+    <div class="field">
+      <label class="field-label" for="editName">The answer</label>
+      <input class="text-input" id="editName" type="text" placeholder="e.g. Rooftop in Barcelona" />
+      <span class="field-help">This is what the players have to say.</span>
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="editAliases">Also accept</label>
+      <input class="text-input" id="editAliases" type="text" placeholder="barcelona rooftop, the rooftop" />
+      <span class="field-help">Separate with commas. Camera filenames make poor answers — this fixes that.</span>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn--ghost" id="btnEditCancel" type="button">Cancel</button>
+      <button class="btn btn--primary" id="btnEditSave" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- reveal -->
+<div class="overlay" id="overlayReveal" hidden>
+  <div class="modal modal--reveal">
+    <p class="eyebrow" id="revealEyebrow">Identified</p>
+    <h2 class="reveal-title" id="revealTitle">—</h2>
+    <figure class="reveal-figure">
+      <img id="revealImg" alt="The full photo" />
+    </figure>
+    <table class="scorecard" id="scorecard"></table>
+    <div class="over-actions">
+      <button class="btn btn--primary btn--big" id="btnNext" type="button">Next game</button>
+      <button class="btn btn--ghost" id="btnReplay" type="button">Play again — same photo</button>
+      <button class="btn btn--ghost" id="btnPick" type="button">Choose another photo…</button>
+    </div>
+  </div>
+</div>
+
+<!-- help -->
+<div class="overlay" id="overlayHelp" hidden>
+  <div class="modal">
+    <p class="eyebrow">How to play</p>
+    <h2 class="reveal-title">Field manual</h2>
+    <ul class="manual">
+      <li><b>Flip.</b> Every card starts face down. Click one to turn it over and enlarge it in the inspector, along with its true position (row/column) and its four neighbours.</li>
+      <li><b>Score.</b> Each card you turn for the first time costs points. Good runs are the ones where a sharp eye beats a thorough sweep.</li>
+      <li><b>Host.</b> Players say the name out loud. The host presses <b>Game complete</b>. The reveal card then moves on to the next photo in the library, or offers the same photo again. The mic button is optional — it just writes down what was said.</li>
+      <li><b>Modes.</b> <b>Advanced</b> scrambles the 30 cards — flip cards and use the inspector to piece the photo together. <b>Easy</b> keeps the photo assembled on the board and lets players reveal up to <b>12</b> pieces in place.</li>
+      <li><b>Library.</b> Photos come from a folder you choose. Add, rename or move files any time and press <b>Rescan folder</b>; names you have edited are remembered.</li>
+      <li><b>Intel.</b> The category hint is free. Turning a card over for them, or narrowing to three options, costs points but can save the run.</li>
+      <li><b>Keyboard.</b> <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> to move between cards, <kbd>Enter</kbd> to complete the round, <kbd>Esc</kbd> to close.</li>
+    </ul>
+    <button class="btn btn--primary" id="btnCloseHelp" type="button">Got it</button>
+  </div>
+</div>
+
+<!-- game over -->
+<div class="overlay" id="overlayOver" hidden>
+  <div class="modal modal--over">
+    <p class="eyebrow" id="overEyebrow">Case closed</p>
+    <h2 class="reveal-title" id="overTitle">—</h2>
+    <p class="lede" id="overBlurb"></p>
+    <div class="final-score"><span id="finalScore">0</span><small>points</small></div>
+    <ul class="tally" id="overTally"></ul>
+    <div class="over-photos" id="overPhotos"></div>
+    <div class="over-actions">
+      <button class="btn btn--primary btn--big" id="btnAgain" type="button">New investigation</button>
+      <button class="btn btn--ghost" id="btnMenu" type="button">Change difficulty</button>
+    </div>
+  </div>
+</div>
+
+<!-- one-off upload -->
+<div class="overlay" id="overlayUpload" hidden>
+  <div class="modal">
+    <p class="eyebrow">Custom case file</p>
+    <h2 class="reveal-title">Bring your own photo</h2>
+    <p class="lede">Pick one image and tell the game what to call it. For a whole folder of photos, use the <b>Photo library</b> instead.</p>
+
+    <label class="drop" id="drop" tabindex="0">
+      <input type="file" id="fileInput" accept="image/*" hidden />
+      <span class="drop-mark" aria-hidden="true">＋</span>
+      <span class="drop-text" id="dropText">Choose an image, or drop one here</span>
+    </label>
+
+    <div class="field" id="answerField" hidden>
+      <label class="field-label" for="titleInput">What should the answer be?</label>
+      <input class="text-input" id="titleInput" type="text" placeholder="e.g. Our dog at the beach" />
+      <span class="field-help">Alternate spellings? Separate them with commas — e.g. <code>golden retriever, my dog, the dog</code></span>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn--ghost" id="btnUploadCancel" type="button">Back</button>
+      <button class="btn btn--primary" id="btnUploadGo" type="button" disabled>Play with this photo</button>
+    </div>
+  </div>
+</div>
+
+<div class="sr-only" id="live" role="status" aria-live="polite"></div>
+
+<script src="js/stage.js"></script>
+<script src="js/library.js"></script>
+<script src="js/puzzle.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

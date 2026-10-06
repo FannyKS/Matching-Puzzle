@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Photo Detective — parse check</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, Menlo, monospace; margin: 20px; background: #111; color: #ddd; }
+  .ok { color: #6f6; } .bad { color: #f66; font-weight: 700; }
+  pre { margin: 0; }
+</style>
+</head>
+<body>
+<pre id="out"></pre>
+
+<script>
+/* ============================================================
+   parsecheck.html — the cheapest test in the suite.
+
+   Every script is fetched as text and handed to the Function
+   constructor. A syntax error throws before a single line of the
+   game has run, so this catches the failure that makes all the
+   other pages report nothing at all: a file that does not parse.
+
+   The test pages themselves are checked too. A harness that does not
+   parse reports nothing and looks exactly like a hang, which is a
+   slow and confusing way to find a missing brace.
+
+   Parsing is the one thing that can be checked without a DOM, which
+   is why this page runs even when everything else is on fire.
+   ============================================================ */
+
+(function () {
+  'use strict';
+
+  var GAME = ['stage.js', 'library.js', 'puzzle.js', 'game.js'];
+  var PAGES = ['probe.html', 'play-through.html', 'memphobe.html'];
+  var OUT = document.getElementById('out');
+  var lines = [];
+  var failures = 0;
+
+  function paint(line) {
+    lines.push(line);
+    OUT.textContent = lines.join('\n');
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report', true);
+    post.send(line + '\n');
+  }
+
+  /** Compile one file's inline <script> bodies, which is all a harness is. */
+  function compilePage(name, html) {
+    var blocks = html.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g) || [];
+    if (!blocks.length) throw new Error('no inline script found');
+    blocks.forEach(function (tag) {
+      var body = tag.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, '');
+      new Function(body);
+    });
+    return blocks.length;
+  }
+
+  function check(path, label, after) {
+    return fetch(path)
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (text) {
+        var detail = after(text);
+        paint('OK   ' + label + (detail ? '  ' + detail : ''));
+      })
+      .catch(function (err) {
+        failures++;
+        paint('FAIL ' + label + '  ' + (err && err.message ? err.message : err));
+      });
+  }
+
+  Promise.all(GAME.map(function (name) {
+    return check('../js/' + name, 'js/' + name, function (src) {
+      // new Function compiles without running. A syntax error throws here.
+      new Function(src);
+      return '(' + src.length + ' chars)';
+    });
+  }).concat(PAGES.map(function (name) {
+    return check(name, 'test/' + name, function (html) {
+      return '(' + compilePage(name, html) + ' inline script)';
+    });
+  }))).then(function () {
+    paint('failures ' + failures);
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report-final', true);
+    post.send('failures ' + failures + '\n' + lines.join('\n') + '\n');
+  });
+})();
+</script>
+</body>
+</html>

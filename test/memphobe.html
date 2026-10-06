@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Photo Detective — no IndexedDB</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; }
+  #out { position: fixed; inset: auto 0 0 0; z-index: 99999; max-height: 40vh; overflow: auto;
+         font: 12px/1.45 ui-monospace, Menlo, monospace; background: #000; color: #ddd;
+         padding: 8px 10px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<pre id="out"></pre>
+
+<script>
+/* ============================================================
+   memphobe.html — the suite for a browser that will not give us
+   IndexedDB.
+
+   Private windows, some embedded browsers and a few headless setups
+   either throw on open() or accept it and then never call back. Either
+   way the library must still work for this session and say plainly
+   that the photos will be forgotten on reload. Without this page the
+   fallback is only reachable by accident, in the one environment
+   where nobody is watching.
+   ============================================================ */
+
+(function () {
+  'use strict';
+
+  var OUT = document.getElementById('out');
+  var passes = 0, failures = 0, LINES = [];
+  var PD = null;
+
+  function paint(line) {
+    LINES.push(line);
+    OUT.textContent = LINES.join('\n');
+    OUT.scrollTop = OUT.scrollHeight;
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report', true);
+    post.send(line + '\n');
+  }
+  function section(n) { paint('\n== ' + n); }
+  function ok(cond, label, got) {
+    if (cond) { passes++; paint('PASS ' + label + (got == null ? '' : '  [' + got + ']')); }
+    else { failures++; paint('FAIL ' + label + '  [got=' + got + ']'); }
+    return !!cond;
+  }
+  function eq(a, b, label) {
+    return ok(a === b, label, JSON.stringify(a) + ' want ' + JSON.stringify(b));
+  }
+  function bail(where, err) {
+    failures++;
+    paint('FAIL threw in ' + where + ': ' + (err && err.stack ? err.stack : err));
+  }
+  function finish() {
+    paint('failures ' + failures);
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report-final', true);
+    post.send('failures ' + failures + '\n' + LINES.join('\n') + '\n');
+  }
+  function waitFor(test, ms, why) {
+    ms = ms || 4000;
+    var deadline = Date.now() + ms;
+    return new Promise(function (resolve, reject) {
+      (function again() {
+        var v;
+        try { v = test(); } catch (e) { reject(e); return; }
+        if (v) { resolve(v); return; }
+        if (Date.now() > deadline) { reject(new Error('timed out waiting for ' + (why || 'condition'))); return; }
+        setTimeout(again, 25);
+      })();
+    });
+  }
+
+  var D = document;
+  function $(id) { return D.getElementById(id); }
+  function q(sel) { return Array.prototype.slice.call(D.querySelectorAll(sel)); }
+  function click(node) {
+    if (!node) throw new Error('clicked nothing');
+    node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  }
+  function flippedCount() { return q('.piece.is-flipped').length; }
+
+  /* ------------------------------------------- break IndexedDB, on purpose
+
+     Deleted before library.js is evaluated, so the real storage() has to
+     notice for itself. This is the failure mode being tested, not a mock
+     of the answer. */
+  function breakIndexedDb() {
+    try { delete window.indexedDB; } catch (e) { window.indexedDB = undefined; }
+    try { window.indexedDB = undefined; } catch (e) {}
+  }
+
+  function fixtures() {
+    var paths = [
+      'Photo library/beach_sunset.png',
+      'Photo library/2023 Spain/Beach.png',
+      'Photo library/2024 Iceland/aurora.png',
+      'Photo library/2024 Iceland/Beach.png'
+    ];
+    return Promise.all(paths.map(function (path) {
+      return fetch('../test/fixtures/' + path).then(function (r) { return r.blob(); })
+        .then(function (blob) {
+          var f = new File([blob], path.split('/').pop(), { type: 'image/png' });
+          Object.defineProperty(f, 'webkitRelativePath', { value: path });
+          return f;
+        });
+    }));
+  }
+
+  function boot() {
+    return fetch('../index.html').then(function (r) { return r.text(); }).then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var stage = $('stage');
+      Array.prototype.slice.call(doc.body.children).forEach(function (node) {
+        if (node.tagName === 'SCRIPT') return;
+        stage.appendChild(D.importNode(node, true));
+      });
+      return ['stage.js', 'library.js', 'puzzle.js', 'game.js'].reduce(function (chain, src) {
+        return chain.then(function () {
+          return new Promise(function (resolve, reject) {
+            var s = D.createElement('script');
+            s.src = '../js/' + src;
+            s.onload = resolve;
+            s.onerror = function () { reject(new Error('failed to load js/' + src)); };
+            D.head.appendChild(s);
+          });
+        });
+      }, Promise.resolve());
+    });
+  }
+
+  breakIndexedDb();
+
+  boot().then(function () {
+    PD = window.PhotoDetective;
+    var lib = window.PhotoLibrary;
+    ok(!!PD && !!lib, 'the game booted without IndexedDB');
+
+    section('the library falls back');
+    var snap = lib.state();
+    eq(snap.storage, 'memory', 'photos are held in memory', snap.storage);
+    eq(snap.cached, false, 'and nothing pretends to be cached', snap.cached);
+    eq(snap.ready, false, 'nothing is stored yet', snap.ready);
+
+    return fixtures().then(function (files) {
+      return lib.importFiles(files, null);
+    });
+  }).then(function () {
+    var snap = window.PhotoLibrary.state();
+    section('photos still import');
+    eq(snap.total, 4, 'every photo was read', snap.total);
+    eq(snap.present, 4, 'all of them are playable', snap.present);
+    eq(snap.storage, 'memory', 'still only in memory', snap.storage);
+
+    section('and the host is told the truth about it');
+    // A silent fallback is the failure mode worth catching: photos that look
+    // saved and are not.
+    ok(!$('libHint').hidden, 'the host is warned', $('libHint').textContent);
+    ok(/reload|forget|this session/i.test($('libHint').textContent), 'and told what it means',
+       $('libHint').textContent);
+    ok(/choose the folder again/i.test($('libHint').textContent),
+       'and that the folder has to be picked again next time', $('libHint').textContent);
+
+    section('the photos still play');
+    click($('btnStart'));
+    return waitFor(function () {
+      return PD.debug().phase === 'playing' && q('.piece').length === 30 && !flippedCount();
+    }, 6000, 'the board');
+  }).then(function () {
+    eq(PD.debug().deck, 4, 'the whole library is the deck', PD.debug().deck);
+    ok(!!PD.debug().current, 'a photo was dealt', PD.debug().current);
+    eq(flippedCount(), 0, 'face down to start', flippedCount());
+
+    click(q('.piece')[4]);
+    eq(flippedCount(), 1, 'a card turns', flippedCount());
+    ok(/R\d+ · C\d+/.test($('tagPos').textContent), 'and shows its true home', $('tagPos').textContent);
+
+    section('thumbnails and renames still work');
+    var withThumbs = window.PhotoLibrary.present().filter(function (e) {
+      return /^data:image\//.test(e.thumb || '');
+    });
+    eq(withThumbs.length, 4, 'every photo has a thumbnail', withThumbs.length);
+
+    click($('btnLibrary'));
+    return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); }, 3000, 'the picker');
+  }).then(function () {
+    var card = q('.lib-card').filter(function (c) { return c.querySelector('.lib-edit'); })[0];
+    ok(card, 'a library photo can be renamed');
+    click(card.querySelector('.lib-edit'));
+    return waitFor(function () { return !$('overlayEdit').hasAttribute('hidden'); }, 3000, 'the rename dialog');
+  }).then(function () {
+    $('editName').value = 'Renamed here too';
+    click($('btnEditSave'));
+    return waitFor(function () { return $('overlayEdit').hasAttribute('hidden'); }, 3000, 'the dialog closing');
+  }).then(function () {
+    var renamed = window.PhotoLibrary.present().filter(function (e) {
+      return e.title === 'Renamed here too';
+    });
+    eq(renamed.length, 1, 'the rename stuck for the session', renamed.length);
+    ok(PD.isCorrect('renamed here too', renamed[0].answers), 'and the new name identifies it',
+       renamed[0].answers.join(' / '));
+  }).catch(function (err) {
+    bail('chain', err);
+  }).then(function () { finish(); });
+})();
+</script>
+</body>
+</html>

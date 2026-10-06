@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Photo Detective — the host's loop</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; }
+  #out { position: fixed; inset: auto 0 0 0; z-index: 99999; max-height: 46vh; overflow: auto;
+         font: 12px/1.45 ui-monospace, Menlo, monospace; background: #000; color: #ddd;
+         padding: 8px 10px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<pre id="out"></pre>
+
+<script>
+/* ============================================================
+   play-through.html — the host's actual loop, start to finish.
+
+   This is the question a host asks out loud: does the game draw its
+   photos from the library folder, and does pressing "Game complete"
+   bring up the next one?
+
+   So it does exactly that and nothing else. Point the game at the
+   folder, then press Game complete over and over -- twice round the
+   library, because a party outlasts one pass -- and check every photo
+   comes up once per pass, in a stable order, each deal dealt face
+   down and playable.
+   ============================================================ */
+
+(function () {
+  'use strict';
+
+  var OUT = document.getElementById('out');
+  var passes = 0, failures = 0, LINES = [];
+  var PD = null;
+  var deck = [];                 // the deck as dealt, read once at the start
+  var dealt = [];                // every photo that came up, in order
+
+  function paint(line) {
+    LINES.push(line);
+    OUT.textContent = LINES.join('\n');
+    OUT.scrollTop = OUT.scrollHeight;
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report', true);
+    post.send(line + '\n');
+  }
+  function section(n) { paint('\n== ' + n); }
+  function ok(cond, label, got) {
+    if (cond) { passes++; paint('PASS ' + label + (got == null ? '' : '  [' + got + ']')); }
+    else { failures++; paint('FAIL ' + label + '  [got=' + got + ']'); }
+    return !!cond;
+  }
+  function eq(a, b, label) {
+    return ok(a === b, label, JSON.stringify(a) + ' want ' + JSON.stringify(b));
+  }
+  function bail(where, err) {
+    failures++;
+    paint('FAIL threw in ' + where + ': ' + (err && err.stack ? err.stack : err));
+  }
+  function finish() {
+    paint('failures ' + failures);
+    var post = new XMLHttpRequest();
+    post.open('POST', '/report-final', true);
+    post.send('failures ' + failures + '\n' + LINES.join('\n') + '\n');
+  }
+  function waitFor(test, ms, why) {
+    ms = ms || 6000;
+    var deadline = Date.now() + ms;
+    return new Promise(function (resolve, reject) {
+      (function again() {
+        var v;
+        try { v = test(); } catch (e) { reject(e); return; }
+        if (v) { resolve(v); return; }
+        if (Date.now() > deadline) {
+          reject(new Error('timed out waiting for ' + (why || 'condition') +
+            ' [now playing ' + JSON.stringify(PD && PD.debug().current) + ']'));
+          return;
+        }
+        setTimeout(again, 25);
+      })();
+    });
+  }
+
+  var D = document;
+  function $(id) { return D.getElementById(id); }
+  function q(sel) { return Array.prototype.slice.call(D.querySelectorAll(sel)); }
+  function click(node) {
+    if (!node) throw new Error('clicked nothing');
+    node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  }
+  function flippedCount() { return q('.piece.is-flipped').length; }
+
+  /* The cards are rebuilt per round, so a different first node is what says
+     "the new round is up" rather than "the old one is still there". */
+  function waitForBoard(ready, what) {
+    var previous = q('.piece')[0];
+    return waitFor(function () {
+      var cards = q('.piece');
+      return cards.length === 30 && cards[0] !== previous &&
+             ready() && PD.debug().flipped === 0 && !flippedCount();
+    }, 6000, 'a fresh face-down board ' + what);
+  }
+
+  function waitForRound(title) {
+    return waitForBoard(function () { return PD.debug().current === title; }, 'for ' + title);
+  }
+
+  /* The reveal card says only "Next game" -- it does not name the photo, so the
+     host cannot see what is coming either. The next photo is therefore checked
+     by what gets dealt, not by what the button promised. `previous` must be
+     read before the click, because the deal can land immediately. */
+  function waitForNewRound(previous) {
+    return waitForBoard(function () { return PD.debug().current !== previous; },
+                        'with a photo other than ' + previous);
+  }
+
+  var PATHS = [
+    'Photo library/beach_sunset.png',
+    'Photo library/2023 Spain/Beach.png',
+    'Photo library/2024 Iceland/aurora.png',
+    'Photo library/2024 Iceland/Beach.png'
+  ];
+
+  function fixtures() {
+    return Promise.all(PATHS.map(function (path) {
+      return fetch('../test/fixtures/' + path).then(function (r) { return r.blob(); })
+        .then(function (blob) {
+          var f = new File([blob], path.split('/').pop(), { type: 'image/png' });
+          Object.defineProperty(f, 'webkitRelativePath', { value: path });
+          return f;
+        });
+    }));
+  }
+
+  function boot() {
+    return fetch('../index.html').then(function (r) { return r.text(); }).then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var stage = $('stage');
+      Array.prototype.slice.call(doc.body.children).forEach(function (node) {
+        if (node.tagName === 'SCRIPT') return;
+        stage.appendChild(D.importNode(node, true));
+      });
+      return ['stage.js', 'library.js', 'puzzle.js', 'game.js'].reduce(function (chain, src) {
+        return chain.then(function () {
+          return new Promise(function (resolve, reject) {
+            var s = D.createElement('script');
+            s.src = '../js/' + src;
+            s.onload = resolve;
+            s.onerror = function () { reject(new Error('failed to load js/' + src)); };
+            D.head.appendChild(s);
+          });
+        });
+      }, Promise.resolve());
+    });
+  }
+
+  boot().then(function () {
+    PD = window.PhotoDetective;
+    var lib = window.PhotoLibrary;
+    ok(!!PD && !!lib, 'the game booted');
+
+    /* ================================ the photos come from the library folder */
+    section('the photos come from the folder');
+    return fixtures().then(function (files) {
+      return lib.importFiles(files, null);
+    }).then(function () {
+      eq(lib.state().present, 4, 'the folder was read', lib.state().present);
+      eq(lib.state().folder, 'Photo library', 'and it is the Photo library', lib.state().folder);
+      ok(/library/i.test($('btnStart').textContent),
+         'the start button says the game will use it', $('btnStart').textContent);
+
+      click($('btnStart'));
+      return waitFor(function () {
+        return PD.debug().phase === 'playing' && q('.piece').length === 30 && !flippedCount();
+      }, 6000, 'the board');
+    }).then(function () {
+      eq(PD.debug().deck, 4, 'the deck is the four photos in the folder', PD.debug().deck);
+      deck = PD.deckTitles();
+      var inFolder = window.PhotoLibrary.present().map(function (e) { return e.title; });
+
+      // Shuffled on purpose: a party should not get the photos in filename
+      // order. So compare the sets, not the sequences.
+      eq(deck.slice().sort().join(' | '), inFolder.slice().sort().join(' | '),
+         'the deck is exactly the folder, shuffled', deck.join(' -> '));
+      eq(PD.debug().current, deck[0], 'and the first photo is dealt', PD.debug().current);
+      // The set comparison above is the whole claim: the folder is the only
+      // source there is, so a deck that differs from it by even one photo
+      // would mean something else is being dealt.
+
+      // Two full passes: the folder once, then the same order again.
+      return playPass(deck.length * 2);
+    });
+  }).then(function () {
+    section('what the host gets');
+    eq(dealt.join(' | '), deck.concat(deck).join(' | '),
+       'two presses per photo, twice round the folder', dealt.join(' -> '));
+    eq(PD.debug().found, deck.length * 2, 'every round was identified', PD.debug().found);
+    eq($('statFound').textContent, '8 / 4', 'the readout shows it has gone round again',
+       $('statFound').textContent);
+    eq(PD.debug().phase, 'playing', 'a round is in play', PD.debug().phase);
+    eq(q('.piece').length, 30, 'with all 30 cards', q('.piece').length);
+    // One card is up because each turn proved the deal was playable.
+    eq(flippedCount(), 1, 'and only the card just turned', flippedCount());
+    ok(PD.debug().banked > 0, 'and the score banked', String(PD.debug().banked));
+  }).catch(function (err) {
+    bail('chain', err);
+  }).then(function () { finish(); });
+
+  /* ------------------------------------------------- the loop, pressed
+     Every turn does what the host does and nothing else: say the answer,
+     press Game complete, take the next photo the card offers. */
+  function playPass(times) {
+    if (times <= 0) return Promise.resolve();
+    return turn().then(function () { return playPass(times - 1); });
+  }
+
+  function turn() {
+    var inPlay = PD.debug().current;
+    dealt.push(inPlay);
+
+    $('answerInput').value = 'they said ' + inPlay;
+    click($('btnComplete'));
+    return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); },
+                   6000, 'the reveal card').then(function () {
+      // The reveal must show the photo that was actually dealt.
+      eq($('revealTitle').textContent, inPlay, 'the reveal shows the photo dealt',
+         $('revealTitle').textContent);
+      ok(/^Identified/.test($('revealEyebrow').textContent), 'marked identified',
+         $('revealEyebrow').textContent);
+      ok(!!$('revealImg').src.match(/^data:image\//), 'with the whole photo');
+
+      // And it must offer what comes next, focused, as the way on -- without
+      // saying which photo, because the players are reading over the host's
+      // shoulder and must not be able to see it coming.
+      ok(!$('btnNext').hidden, 'and offers another game');
+      eq($('btnNext').textContent, 'Next game', 'labelled without the photo name',
+         $('btnNext').textContent);
+      ok(D.activeElement === $('btnNext'), 'focused, so Enter alone runs the party',
+         D.activeElement.id);
+      ok($('btnNext').className.indexOf('btn--primary') !== -1, 'and it is the primary action');
+      ok(/same photo/i.test($('btnReplay').textContent), 'the same photo is still one click away',
+         $('btnReplay').textContent);
+      ok(/another photo/i.test($('btnPick').textContent), 'and so is picking one',
+         $('btnPick').textContent);
+
+      click($('btnNext'));
+
+      // The next game must be dealt, not merely labelled: 30 cards, face down.
+      return waitForNewRound(inPlay).then(function () {
+        var offered = PD.debug().current;
+        ok(offered && offered !== inPlay, 'a different photo is dealt', offered);
+        ok(deck.indexOf(offered) !== -1, 'one from the folder', offered);
+        // No "not seen yet this pass" check here: the deck is a cycle, so the
+        // photo after the last one is the first one again, which is correct.
+        // `dealt` is compared against deck.concat(deck) at the end instead.
+        eq(q('.piece').length, 30, 'with all 30 cards', q('.piece').length);
+        eq(flippedCount(), 0, 'all face down', flippedCount());
+        eq(q('.piece.is-flipped').length, 0, 'none left turned', q('.piece.is-flipped').length);
+        eq(q('.overlay:not([hidden])').length, 0, 'no overlay left open',
+           q('.overlay:not([hidden])').length);
+        eq(PD.debug().phase, 'playing', 'and playable', PD.debug().phase);
+        eq(PD.debug().flipped, 0, 'nothing turned yet', PD.debug().flipped);
+
+        // Loaded is not the same as playable: turn one and it must cost.
+        var before = PD.debug().live;
+        click(q('.piece')[7]);
+        eq(flippedCount(), 1, 'a card turns', flippedCount());
+        ok(PD.debug().live < before, 'and is charged', String(PD.debug().live));
+      });
+    });
+  }
+})();
+</script>
+</body>
+</html>
