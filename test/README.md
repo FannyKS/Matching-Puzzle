@@ -35,7 +35,7 @@ the picker is the real code path.
 | Page | What it covers |
 | --- | --- |
 | `parsecheck.html` | Each script compiles, and so does each harness page. Catches the failure that makes every other page report nothing. |
-| `probe.html` | The game: library folder, naming, face-down cards, slice accuracy, sharpness, a cache written by an older build, a photo swapped on disk, scoring, the reveal card, moving between photos, intel, strikes, ending a run, and the **Easy** mode (whole photo, reveal 12 pieces). |
+| `probe.html` | The game: library folder, naming, face-down cards, slice accuracy, sharpness, a cache written by an older build, a photo swapped on disk, the Rescan buttons, scoring, the reveal card, moving between photos, intel, strikes, ending a run, and the **Easy** mode (whole photo, reveal 12 pieces). |
 | `play-through.html` | The host's loop, pressed the way a host presses it: photos from the folder, then **Game complete** twice round the library. |
 | `memphobe.html` | A browser that refuses IndexedDB. Deletes `indexedDB` before `library.js` runs, then checks the photos still play and that the host is told they will be forgotten. |
 | `real-photos.html` | The real `Photo Library/` folder in this project, not the fixtures. Diagnostic, not part of `run-all.sh`. |
@@ -125,6 +125,13 @@ A small photo cannot be made sharp by any of this. If a photo is 400 px across,
 a sixth of it is 66 px, and a 180 CSS px card shows those 66 px whatever the
 pipeline does. Bigger source files are the only fix.
 
+Rescanning is surfaced in two places for the host: a **Rescan folder** button in
+the photo-library overlay, and (since a folder is chosen from the start screen)
+the same button on the start screen, shown once a folder is in. Both
+re-pick the folder — a browser will not hand back a folder without a gesture —
+which is what lets a scan notice a photo replaced on disk. `probe.html` checks
+both buttons appear and hide with the library.
+
 ## Easy mode
 
 There are two game modes, chosen from the start screen:
@@ -137,6 +144,17 @@ There are two game modes, chosen from the start screen:
   revealed; after that the board asks the players to name the photo. Everything
   from **Game complete** onward — the reveal card, the scorecard, next game,
   same photo, choosing another — is identical to Advanced mode.
+
+The mode can also be switched **without reloading**: the reveal card carries its
+own Easy/Advanced picker ("Next round mode"), kept in step with the start picker.
+Picking a mode there changes what the next round mounts as — the start picker,
+the reveal picker and `state.mode` are always the same. On a run-over reveal the
+picker is hidden, because there is no next round to choose for.
+
+The reveal card also shows the photo large: the modal is up to 880 px wide (the
+older 560 px), with the scorecard, mode picker and actions kept to a centred
+reading width underneath. The reveal image is rendered at 1600×1200 so it stays
+crisp at that size.
 
 In Easy mode the puzzle is built with `shuffle: false`, so
 `puzzle.pieces[i].id === i` — that is what `probe.html` asserts the board is

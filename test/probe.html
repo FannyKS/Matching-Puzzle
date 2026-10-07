@@ -345,6 +345,8 @@
     ok(/photo library/i.test($('btnStart').textContent),
        'the start button says what it is going to do', $('btnStart').textContent);
     ok(!$('btnStart').disabled, 'and it is there to be pressed', $('btnStart').disabled);
+    ok($('btnStartRescan').hidden, 'with no folder there is nothing to rescan',
+       'btnStartRescan hidden=' + $('btnStartRescan').hidden);
 
     click($('btnStart'));
     return waitFor(function () { return !$('overlayLibrary').hasAttribute('hidden'); },
@@ -377,6 +379,9 @@
       eq(snap.missing, 0, 'and none is missing', snap.missing);
       eq(snap.folder, 'Photo library', 'the folder is remembered by name', snap.folder);
       eq(snap.storage, 'indexeddb', 'photos are cached, so a reload keeps them', snap.storage);
+      ok(!$('btnStartRescan').hidden,
+         'once a folder is in, the start screen offers a Rescan folder button',
+         'btnStartRescan hidden=' + $('btnStartRescan').hidden);
 
       // present() plays in a stable order: sorted by folder-relative path.
       var names = lib.present().map(function (e) { return e.title; });
@@ -833,9 +838,10 @@
       // Against the library, not against the deck: the deck is the snapshot the
       // run was dealt from, while the photo on the board carries whatever name
       // the library holds now. Earlier sections rename photos, so those two can
-      // legitimately differ.
-      ok(lib.present().some(function (e) { return e.title === nextTitle; }),
-         'one from the folder', nextTitle);
+      // legitimately differ. Compare by id — the title on the board can be a
+      // stale deck snapshot while the library has moved on.
+      ok(lib.present().some(function (e) { return e.id === PD.debug().currentId; }),
+         'one from the folder', lib.present().map(function (e) { return e.title; }).join(', '));
       eq($('overlayReveal').hasAttribute('hidden'), true, 'the reveal card is gone');
       eq(q('.overlay:not([hidden])').length, 0, 'no overlay left open', q('.overlay:not([hidden])').length);
       eq(PD.debug().found, 1, 'the identified photo still counts', PD.debug().found);
@@ -1142,6 +1148,33 @@
     ok(inPlaceN, 'and the next photo stays whole on the board');
     eq(flippedCount(), 0, 'all face down again', flippedCount());
     eq($('statPieces').textContent, '0 / 12', 'with a fresh reveal budget', $('statPieces').textContent);
+
+    // Switching modes needs no reload: from the reveal card, pick Advanced and
+    // the next round mounts scrambled with the inspector back.
+    click($('btnComplete'));
+    return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
+  }).then(function () {
+    ok(!$('revealModeField').hidden, 'the reveal card offers a mode switch');
+    eq($('revealModePicker').querySelector('[aria-checked="true"]').dataset.mode, 'easy',
+       'reflecting the easy round just played', 'easy');
+    click(q('#revealModePicker button[data-mode="advance"]')[0]);
+    eq($('revealModePicker').querySelector('[aria-checked="true"]').dataset.mode, 'advance',
+       'and the host can switch it', 'advance');
+    eq($('modePicker').querySelector('[aria-checked="true"]').dataset.mode, 'advance',
+       'the start picker stays in step', 'advance');
+    var prevSwitch = PD.debug().current;
+    click($('btnNext'));
+    return waitForNewRound(prevSwitch);
+  }).then(function () {
+    eq(PD.debug().mode, 'advance', 'the next round plays Advanced', PD.debug().mode);
+    var pzA = PD.puzzle();
+    var scrambledA = false;
+    for (var ai = 0; ai < pzA.pieces.length; ai++) {
+      if (pzA.pieces[ai].id !== ai) { scrambledA = true; break; }
+    }
+    ok(scrambledA, 'and the board is scrambled again');
+    ok(!$('inspectorCard').hasAttribute('hidden'), 'the inspector is back');
+    eq($('statPiecesLabel').textContent, 'Flipped', 'the stat wording returns', $('statPiecesLabel').textContent);
   }).catch(function (err) {
     bail('chain', err);
   }).then(function () { finish(); });

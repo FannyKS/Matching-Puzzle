@@ -213,6 +213,7 @@
     </div>
 
     <button class="btn btn--primary btn--big" id="btnStart" type="button">Choose your Photo library folder</button>
+    <button class="btn btn--ghost btn--wide" id="btnStartRescan" type="button" hidden>Rescan folder</button>
 
     <div class="start-foot">
       <button class="linkish" id="btnStartUpload" type="button">Just one photo this time →</button>
@@ -288,6 +289,17 @@
       <img id="revealImg" alt="The full photo" />
     </figure>
     <table class="scorecard" id="scorecard"></table>
+    <div class="field reveal-mode-field" id="revealModeField">
+      <span class="field-label">Next round mode</span>
+      <div class="segmented segmented--2" id="revealModePicker" role="radiogroup" aria-label="Game mode for the next round">
+        <button type="button" role="radio" aria-checked="false" data-mode="advance">
+          <b>Advanced</b><small>30 scrambled cards · inspector</small>
+        </button>
+        <button type="button" role="radio" aria-checked="true" data-mode="easy">
+          <b>Easy</b><small>Photo, whole · reveal 12 pieces</small>
+        </button>
+      </div>
+    </div>
     <div class="over-actions">
       <button class="btn btn--primary btn--big" id="btnNext" type="button">Next game</button>
       <button class="btn btn--ghost" id="btnReplay" type="button">Play again — same photo</button>

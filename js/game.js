@@ -165,7 +165,10 @@
 
     diffPicker: $('diffPicker'),
     modePicker: $('modePicker'),
+    revealModePicker: $('revealModePicker'),
+    revealModeField: $('revealModeField'),
     btnStart: $('btnStart'),
+    btnStartRescan: $('btnStartRescan'),
     btnStartUpload: $('btnStartUpload'),
 
     libCount: $('libCount'),
@@ -882,6 +885,7 @@
     stopMic();
     state.diff = difficulty;
     state.mode = mode || chosenMode();
+    syncModePickers();
     state.deck = entries && entries.length ? entries : defaultDeck();
     state.index = 0;
     state.score = 0;
@@ -1065,7 +1069,7 @@
     state.phase = 'reveal';
     if (!ok) state.revealTerminal = true;
 
-    el.revealImg.src = state.puzzle.fullCanvas(1000, 750).toDataURL('image/jpeg', 0.9);
+    el.revealImg.src = state.puzzle.fullCanvas(1600, 1200).toDataURL('image/jpeg', 0.9);
 
     if (ok) {
       var said = state.result.value;
@@ -1111,6 +1115,7 @@
     stopMic();
 
     show(el.overlayReveal, true);
+    syncModePickers();
     setRevealActions();
   }
 
@@ -1140,6 +1145,11 @@
 
     if (terminal) el.btnPick.textContent = 'See the results';
     if (next) el.btnNext.textContent = 'Next game';
+
+    // Choosing a mode only matters when the run continues. A terminal reveal
+    // (out of guesses/time) is going to the results screen, so hide the picker
+    // rather than offer a choice that would never apply.
+    if (el.revealModeField) el.revealModeField.hidden = terminal;
 
     lead.focus();
   }
@@ -1452,6 +1462,7 @@
 
     el.libBadge.textContent = snap && snap.present ? (snap.present + ' photos') : 'Library';
     el.btnLibRescan.hidden = !snap || !snap.total;
+    el.btnStartRescan.hidden = !snap || !snap.total;
     el.btnStart.textContent = snap && snap.present
       ? 'Start with your photo library'
       : 'Choose your Photo library folder';
@@ -1827,6 +1838,29 @@
     return (checked && checked.dataset.mode) || 'advance';
   }
 
+  /**
+   * One mode toggle, both pickers: the start screen and the reveal card must
+   * always show the same choice, and state.mode is the single source of truth.
+   */
+  function syncModePickers() {
+    var mode = state.mode || chosenMode();
+    var pickers = [el.modePicker, el.revealModePicker];
+    for (var i = 0; i < pickers.length; i++) {
+      var picker = pickers[i];
+      if (!picker) continue;
+      Array.prototype.forEach.call(picker.querySelectorAll('button'), function (x) {
+        x.setAttribute('aria-checked', String(x.dataset.mode === mode));
+      });
+    }
+  }
+
+  /** Pick a mode anywhere — the reveal card or the start screen — and sync. */
+  function setMode(modeKey) {
+    state.mode = modeKey === 'easy' ? 'easy' : 'advance';
+    syncModePickers();
+    syncModeCopy();
+  }
+
   /** Keep the start-screen lede and rules in step with the chosen mode. */
   function syncModeCopy() {
     var easy = chosenMode() === 'easy';
@@ -1850,15 +1884,17 @@
     sfx.click();
   });
 
-  el.modePicker.addEventListener('click', function (ev) {
-    var b = ev.target.closest('button[data-mode]');
-    if (!b) return;
-    Array.prototype.forEach.call(el.modePicker.querySelectorAll('button'), function (x) {
-      x.setAttribute('aria-checked', String(x === b));
+  function wireModePicker(picker) {
+    if (!picker) return;
+    picker.addEventListener('click', function (ev) {
+      var b = ev.target.closest('button[data-mode]');
+      if (!b) return;
+      setMode(b.dataset.mode);
+      sfx.click();
     });
-    sfx.click();
-    syncModeCopy();
-  });
+  }
+  wireModePicker(el.modePicker);
+  wireModePicker(el.revealModePicker);
 
   /** A fresh run: the whole library, in a random order. */
   function newRun() {
@@ -1938,6 +1974,9 @@
   el.btnLibFolder.addEventListener('click', function () { askLibraryForFolder(false); });
   el.btnLibRescan.addEventListener('click', function () { askLibraryForFolder(true); });
 
+  /* The start screen's Rescan folder buttons straight to the same re-pick. */
+  el.btnStartRescan.addEventListener('click', function () { askLibraryForFolder(true); });
+
   el.libSearch.addEventListener('input', renderLibrary);
 
   el.btnLibClose.addEventListener('click', closeLibrary);
@@ -2001,6 +2040,7 @@
     show(el.overlayStart, true);
     show(el.layout, false);   // don't leave a stale board behind the menu
     state.phase = 'menu';
+    syncModePickers();
   }
   el.btnAgain.addEventListener('click', function () {
     show(el.overlayOver, false);
@@ -2060,6 +2100,7 @@
   updateStats();
   initMic();
   syncModeCopy();
+  syncModePickers();
 
   var l = lib();
   if (l) {
@@ -2095,6 +2136,7 @@
         live: liveScore(),
         index: state.index,
         current: state.current && state.current.title,
+        currentId: state.current && state.current.id,
         flipped: Object.keys(state.seen).length,
         inspected: state.inspected,
         found: state.found,

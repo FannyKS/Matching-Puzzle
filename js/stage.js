@@ -30,6 +30,13 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Every photo is drawn through here, and the ones worth playing sharp are
+    // enlarged many times over (a 500px file fills a 2700px slice source). The
+    // canvas default filter is bilinear, which on that kind of upscale blurs
+    // the edges it does have. Bicubic ('high') keeps as much as there is.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
     // Fit the 1000x750 design space into the target, letterboxed.
     var scale = Math.max(canvas.width / DW, canvas.height / DH);
     ctx.setTransform(scale, 0, 0, scale, (canvas.width - DW * scale) / 2, (canvas.height - DH * scale) / 2);
