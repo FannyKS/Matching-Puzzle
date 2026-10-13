@@ -285,10 +285,8 @@
   <div class="modal modal--reveal">
     <p class="eyebrow" id="revealEyebrow">Identified</p>
     <h2 class="reveal-title" id="revealTitle">—</h2>
-    <figure class="reveal-figure">
-      <img id="revealImg" alt="The full photo" />
-    </figure>
-    <table class="scorecard" id="scorecard"></table>
+    <!-- The next-game controls sit above the photo, so after a round the host
+         can pick the next level and move on without scrolling past the image. -->
     <div class="field reveal-mode-field" id="revealModeField">
       <span class="field-label">Next round mode</span>
       <div class="segmented segmented--2" id="revealModePicker" role="radiogroup" aria-label="Game mode for the next round">
@@ -305,6 +303,10 @@
       <button class="btn btn--ghost" id="btnReplay" type="button">Play again — same photo</button>
       <button class="btn btn--ghost" id="btnPick" type="button">Choose another photo…</button>
     </div>
+    <figure class="reveal-figure">
+      <img id="revealImg" alt="The full photo" />
+    </figure>
+    <table class="scorecard" id="scorecard"></table>
   </div>
 </div>
 

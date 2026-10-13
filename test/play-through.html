@@ -241,10 +241,8 @@
       ok(D.activeElement === $('btnNext'), 'focused, so Enter alone runs the party',
          D.activeElement.id);
       ok($('btnNext').className.indexOf('btn--primary') !== -1, 'and it is the primary action');
-      ok(/same photo/i.test($('btnReplay').textContent), 'the same photo is still one click away',
-         $('btnReplay').textContent);
-      ok(/another photo/i.test($('btnPick').textContent), 'and so is picking one',
-         $('btnPick').textContent);
+      ok($('btnReplay').hidden && $('btnPick').hidden,
+         'and it is the only button, so the photo sits right below it');
 
       click($('btnNext'));
 

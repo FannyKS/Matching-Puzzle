@@ -1120,9 +1120,10 @@
   }
 
   /**
-   * What the host can do next, in the order they will reach for it. Moving on
-   * to another photo is the default; the same photo is one click away when they
-   * want another go at this one.
+   * What the host can do next. There is a single way on and the card shows only
+   * that: the next photo when the deck holds one, the results when the round was
+   * lost, or -- with nothing else to deal -- the same photo again. Extra buttons
+   * only pushed the picture down the card.
    *
    * The button deliberately does not name the photo it will deal. Everyone is
    * looking at this card, and a title here would tell the players what is about
@@ -1132,19 +1133,21 @@
     var next = nextEntry();
     var terminal = state.revealTerminal;
 
-    el.btnNext.hidden = !next || terminal;
-    el.btnReplay.hidden = terminal;
-    el.btnReplay.textContent = 'Play again — same photo';
-
-    // Exactly one button wears the primary styling, so Enter and a quick glance
-    // both land on the same place.
+    // Exactly one button is on the card, and it wears the primary styling, so
+    // Enter and a quick glance both land on the same place.
     var lead = terminal ? el.btnPick : (next ? el.btnNext : el.btnReplay);
+
+    el.btnNext.hidden = lead !== el.btnNext;
+    el.btnReplay.hidden = lead !== el.btnReplay;
+    el.btnPick.hidden = lead !== el.btnPick;
+
+    el.btnNext.textContent = 'Next game';
+    el.btnReplay.textContent = 'Play again — same photo';
+    el.btnPick.textContent = terminal ? 'See the results' : 'Choose another photo…';
+
     [el.btnNext, el.btnReplay, el.btnPick].forEach(function (b) {
       b.className = 'btn' + (b === lead ? ' btn--primary btn--big' : ' btn--ghost');
     });
-
-    if (terminal) el.btnPick.textContent = 'See the results';
-    if (next) el.btnNext.textContent = 'Next game';
 
     // Choosing a mode only matters when the run continues. A terminal reveal
     // (out of guesses/time) is going to the results screen, so hide the picker

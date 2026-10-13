@@ -488,6 +488,9 @@ input[type="text"]:disabled { opacity: .45; cursor: not-allowed; }
 .btn:hover:not(:disabled) { background: #232b40; border-color: #333c55; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .38; cursor: not-allowed; }
+/* Buttons are hidden by the `hidden` attribute alone; say so explicitly so a
+   future `display` on `.btn` cannot quietly un-hide one. */
+.btn[hidden] { display: none; }
 
 .btn--primary {
   color: #2a1a05;
@@ -891,8 +894,21 @@ input[type="search"]::-webkit-search-cancel-button { filter: invert(.6); }
 }
 .reveal-figure img { display: block; width: 100%; height: auto; }
 
-/* On the wide reveal card the photo is the star; the scorecard, mode picker
-   and actions stay a comfortable reading width underneath. */
+/* The photo is the whole point of the card, so it is capped to the room left
+   below the controls: the picture sits complete, without a scrollbar. */
+.modal--reveal .reveal-figure {
+  display: flex;
+  justify-content: center;
+}
+.modal--reveal .reveal-figure img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(100vh - 340px);
+}
+
+/* On the wide reveal card the scorecard, mode picker and actions stay a
+   comfortable reading width, centred. */
 .modal--reveal .scorecard,
 .modal--reveal .reveal-mode-field,
 .modal--reveal .over-actions {
@@ -900,6 +916,10 @@ input[type="search"]::-webkit-search-cancel-button { filter: invert(.6); }
   margin-left: auto;
   margin-right: auto;
 }
+
+/* The next-game controls sit at the top of the card, above the photo, so they
+   are reachable without scrolling past a large image. */
+.modal--reveal .over-actions { margin-bottom: 20px; }
 
 .scorecard { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
 .scorecard td {

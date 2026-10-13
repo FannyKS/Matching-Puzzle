@@ -800,6 +800,22 @@
       ok($('revealImg').src.indexOf('data:image/') === 0, 'the whole photo is shown');
       ok($('scorecard').rows.length >= 3, 'the scorecard has lines', String($('scorecard').rows.length));
 
+      // The next-game controls sit above the photo, so a host can pick the next
+      // mode and move on without scrolling past a large image.
+      var fig = document.querySelector('.reveal-figure');
+      ok(($('revealModeField').compareDocumentPosition(fig) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+         'the mode picker sits above the photo');
+      ok((document.querySelector('.modal--reveal .over-actions').compareDocumentPosition(fig) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+         'and so does the Next game button');
+
+      // With one control above it and the photo capped to the room left over,
+      // the whole picture has to sit above the fold -- nothing of it cut off.
+      var figRect = fig.getBoundingClientRect();
+      ok(figRect.bottom <= D.documentElement.clientHeight + 1,
+         'and the whole photo fits on screen, uncut',
+         Math.round(figRect.bottom) + ' of ' + D.documentElement.clientHeight);
+      ok(figRect.top >= 0, 'starting below the top edge', Math.round(figRect.top));
+
       var heard = Array.prototype.map.call($('scorecard').rows, function (tr) { return tr.textContent; })
         .filter(function (t) { return /they said/i.test(t); })[0] || '';
       ok(/northern lights/i.test(heard), 'what was said aloud is written down', heard);
@@ -822,11 +838,12 @@
          'and there is no title hidden anywhere in the label', $('btnNext').textContent);
       ok(D.activeElement === $('btnNext'), 'and holds focus, so Enter works', D.activeElement.id);
       ok($('btnNext').className.indexOf('btn--primary') !== -1, 'it is the primary action');
-      ok($('btnReplay').className.indexOf('btn--primary') === -1, 'the same photo is not');
-      ok($('btnReplay').textContent.indexOf('same photo') !== -1, 'but it is still offered',
-         $('btnReplay').textContent);
-      ok($('btnPick').textContent.indexOf('another photo') !== -1, 'and so is picking one',
-         $('btnPick').textContent);
+      ok($('btnReplay').hidden, 'and the only button -- replaying is gone from the card');
+      ok($('btnPick').hidden, 'so is picking another photo from here');
+      ok(getComputedStyle($('btnReplay')).display === 'none' &&
+         getComputedStyle($('btnPick')).display === 'none',
+         'and they are really hidden, not merely flagged');
+      ok(getComputedStyle($('btnNext')).display !== 'none', 'while the one button shows');
 
       // Nothing on the card says which photo is coming, so the only thing left
       // to check is that pressing the button deals a different one.
@@ -852,10 +869,9 @@
       click(cardByPiece(3));
       eq(flippedCount(), 1, 'the second game is playable', flippedCount());
 
-      /* ============================================ and the same photo on demand */
-      section('another run, same photo');
+      /* ================================== the card carries a single way on */
+      section('one button on the card');
       photoBefore = nextTitle;
-      eq($('btnNext') && true, true, 'the reveal is still reachable after playing');
       $('answerInput').value = 'a guess at the second photo';
       click($('btnComplete'));
       return waitFor(function () { return !$('overlayReveal').hasAttribute('hidden'); }, 4000, 'the reveal card');
@@ -863,24 +879,25 @@
       eq($('revealTitle').textContent, photoBefore, 'the second reveal names the second photo',
          $('revealTitle').textContent);
       eq(PD.debug().found, 2, 'two photos identified in one run', PD.debug().found);
-      ok(!$('btnNext').hasAttribute('hidden'), 'a third photo is offered too');
+      ok(!$('btnNext').hasAttribute('hidden'), 'the next photo is offered');
       ok(D.activeElement === $('btnNext'), 'and focused again', D.activeElement.id);
+      ok($('btnReplay').hidden && $('btnPick').hidden,
+         'as the only button, so nothing crowds the picture');
 
       orderBefore = q('.piece').map(function (c) { return c.dataset.piece; }).join(',');
-      click($('btnReplay'));
-      return waitForRound(photoBefore);
+      click($('btnNext'));
+      return waitForNewRound(photoBefore);
     }).then(function () {
       var d = PD.debug();
       eq(d.phase, 'playing', 'back in play', d.phase);
-      eq(d.current, photoBefore, 'same photo, a new run', d.current);
+      ok(d.current !== photoBefore, 'the next photo is dealt, not the same one', d.current);
       eq(d.found, 2, 'both identified photos still count', d.found);
       eq(flippedCount(), 0, 'all cards face down again', flippedCount());
       eq(q('.piece.is-flipped').length, 0, 'no card left turned', q('.piece.is-flipped').length);
       ok(q('.piece-front canvas').every(blank), 'and no stale slice left showing from the old round',
          q('.piece-front canvas').filter(function (c) { return !blank(c); }).length + ' still painted');
-      ok(q('.piece').map(function (c) { return c.dataset.piece; }).join(',') !== orderBefore,
-         'the cards are shuffled differently');
       ok(d.banked > 0, 'banked score survived the new round', String(d.banked));
+      photoBefore = d.current;
 
       /* ============================================ choosing, mid-round
          The host can also jump straight to any photo without finishing the
@@ -1039,13 +1056,17 @@
     ok(!$('btnReplay').hasAttribute('hidden'), 'the same photo is on offer');
     ok($('btnReplay').className.indexOf('btn--primary') !== -1, 'and it is the primary action');
     eq(D.activeElement.id, 'btnReplay', 'and it has focus', D.activeElement.id);
+    ok($('btnPick').hasAttribute('hidden'), 'and nothing else clutters the card');
 
+    orderBefore = q('.piece').map(function (c) { return c.dataset.piece; }).join(',');
     click($('btnReplay'));
     return waitForRound('Solo Shot');
   }).then(function () {
     eq(PD.debug().current, 'Solo Shot', 'the same photo plays again', PD.debug().current);
     eq(PD.debug().phase, 'playing', 'and it is playable', PD.debug().phase);
     eq(PD.debug().found, 1, 'the round counted', String(PD.debug().found));
+    ok(q('.piece').map(function (c) { return c.dataset.piece; }).join(',') !== orderBefore,
+       'the cards are shuffled differently');
 
     /* =============================== easy mode: the photo stays whole
        A second game mode for a different crowd: same photo, same 30 pieces,

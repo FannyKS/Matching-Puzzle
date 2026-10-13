@@ -142,8 +142,8 @@ There are two game modes, chosen from the start screen:
   where it belongs, so the board reads as the whole photo. Clicking a piece
   reveals it in place (no inspector window). At most **12** pieces may be
   revealed; after that the board asks the players to name the photo. Everything
-  from **Game complete** onward — the reveal card, the scorecard, next game,
-  same photo, choosing another — is identical to Advanced mode.
+  from **Game complete** onward — the reveal card, the scorecard, moving on —
+  is identical to Advanced mode.
 
 The mode can also be switched **without reloading**: the reveal card carries its
 own Easy/Advanced picker ("Next round mode"), kept in step with the start picker.
@@ -152,9 +152,17 @@ the reveal picker and `state.mode` are always the same. On a run-over reveal the
 picker is hidden, because there is no next round to choose for.
 
 The reveal card also shows the photo large: the modal is up to 880 px wide (the
-older 560 px), with the scorecard, mode picker and actions kept to a centred
+older 560 px), with the scorecard, mode picker and action kept to a centred
 reading width underneath. The reveal image is rendered at 1600×1200 so it stays
-crisp at that size.
+crisp at that size, and it is capped to the room left below the controls, so the
+whole picture sits on screen without a scrollbar.
+
+The card offers a **single** way on — one button, never a stack of them, so the
+photo stays high on the card. While the deck holds another photo it is
+**Next game**; after a lost round it is **See the results**; and only when the
+deck is a lone photo is it **Play again — same photo** (there is nowhere else to
+go). The same photo can otherwise be replayed, and another photo picked, from the
+library picker.
 
 In Easy mode the puzzle is built with `shuffle: false`, so
 `puzzle.pieces[i].id === i` — that is what `probe.html` asserts the board is

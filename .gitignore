@@ -101,3 +101,10 @@ htmlcov/
 
 # pyenv
 # .python-version
+
+### Test harness output
+# Transient files written by test/run.sh and its headless Chrome profile.
+test/.report.txt
+test/.report.final.txt
+test/.chrome.log
+test/.chrome-profile/
