@@ -108,3 +108,7 @@ test/.report.txt
 test/.report.final.txt
 test/.chrome.log
 test/.chrome-profile/
+
+### Local reference material
+# Big local-only decks (e.g. the photo-library presentation); not shipped.
+*.pptx
